@@ -20,11 +20,11 @@ def exhaust_all(next_job_f, todo_f, done_f, perform_job_f, verbose=False):
                 sys.stdout.flush()
             a_job = next_job_f(todo_f(), done_f())
             if verbose:
-                sys.stdout.write('acquired, ')
+                sys.stdout.write("acquired '{}'".format(a_job))
                 sys.stdout.flush()
             perform_job_f(a_job)
             if verbose:
-                sys.stdout.write('done.\n')
+                sys.stdout.write('...done.\n')
                 sys.stdout.flush()
                 i += 1
     except JobsExhaustedError:
