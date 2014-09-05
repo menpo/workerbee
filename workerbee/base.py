@@ -32,8 +32,8 @@ def exhaust_all(next_job_f, todo_f, done_f, perform_job_f, verbose=False):
         sys.stdout.flush()
 
 
-def next_job_with_choice(choose_f, remaining_f, todo, done):
-    return choose_f(remaining_f(todo, done))
+def next_job_with_choice(choose_f, remaining_jobs_f, todo, done):
+    return choose_f(remaining_jobs_f(todo, done))
 
 
 def choose_randomly(jobs):
@@ -46,15 +46,15 @@ def choose_randomly(jobs):
 as_paths = lambda p: [Path(i) for i in p]
 
 
-def filename_difference(a, b):
-    paths_a, paths_b = as_paths(a), as_paths(b)
-    src_name_to_path = {a.name: a for a in paths_a}
-    if len(src_name_to_path) != len(paths_a):
-        raise ValueError('Source paths are not uniquely identified by names')
-    remaining_names = set(src_name_to_path) - set(i.name for i in paths_b)
-    return [src_name_to_path[i] for i in remaining_names]
+def filestem_difference(todo, done):
+    paths_todo, paths_done = as_paths(todo), as_paths(done)
+    todo_stem_to_path = {t.stem: t for t in paths_todo}
+    if len(todo_stem_to_path) != len(paths_todo):
+        raise ValueError('todo paths are not uniquely identified by stems')
+    remaining_stems = set(todo_stem_to_path) - set(d.stem for d in paths_done)
+    return [todo_stem_to_path[i] for i in remaining_stems]
 
 
 random_next_job = partial(next_job_with_choice, choose_randomly)
-random_next_filename = partial(random_next_job, filename_difference)
-exhaust_all_files_randomly = partial(exhaust_all, random_next_filename)
+random_next_file_from_stems = partial(random_next_job, filestem_difference)
+exhaust_all_files_randomly = partial(exhaust_all, random_next_file_from_stems)
