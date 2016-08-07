@@ -17,4 +17,5 @@ setup(name='workerbee',
       author='The Menpo Team',
       author_email='hello@menpo.org',
       packages=find_packages(),
-      install_requires=requirements)
+      install_requires=requirements
+)
