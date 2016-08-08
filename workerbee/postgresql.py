@@ -1,7 +1,6 @@
 from __future__ import division
 import os
 import sys
-import warnings
 
 from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
@@ -29,12 +28,12 @@ TABLE_EXISTS_QUERY = r"""
 SELECT EXISTS(
     SELECT *
     FROM information_schema.tables
-    WHERE table_name = 'job_{}'
+    WHERE table_name = 'wb__{}'
 );
 """
 
 CREATE_TABLE_QUERY = r"""
-CREATE TABLE job_{}(
+CREATE TABLE wb__{}(
   job_id TEXT UNIQUE NOT NULL PRIMARY KEY,
   data json,
   completed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -43,43 +42,43 @@ CREATE TABLE job_{}(
 """
 
 INSERT_JOB_QUERY = r"""
-INSERT INTO job_{0} (job_id) VALUES (%(job_id)s) RETURNING job_id
+INSERT INTO wb__{0} (job_id) VALUES (%(job_id)s) RETURNING job_id
 """
 
 UPDATE_DATA_QUERY = r"""
-UPDATE job_{0} SET data=%(data)s WHERE job_id=%(job_id)s
+UPDATE wb__{0} SET data=%(data)s WHERE job_id=%(job_id)s
 """
 
 RANDOM_UNCOMPLETED_UNCLAIMED_ROW_QUERY = r"""
 SELECT *
-FROM job_{0} WHERE completed=false AND claimed=false OFFSET floor(random() * (
-    SELECT COUNT(*) FROM job_{0} WHERE completed=false AND claimed=false
+FROM wb__{0} WHERE completed=false AND claimed=false OFFSET floor(random() * (
+    SELECT COUNT(*) FROM wb__{0} WHERE completed=false AND claimed=false
 ))
 LIMIT 1;
 """
 
 RANDOM_UNCOMPLETED_ROW_QUERY = r"""
 SELECT *
-FROM job_{0} WHERE completed=false OFFSET floor(random() * (
-    SELECT COUNT(*) FROM job_{0} WHERE completed=false
+FROM wb__{0} WHERE completed=false OFFSET floor(random() * (
+    SELECT COUNT(*) FROM wb__{0} WHERE completed=false
 ))
 LIMIT 1;
 """
 
 SET_ROW_COMPLETED_BY_ID_QUERY = r"""
-UPDATE job_{} SET completed=true WHERE job_id=%(job_id)s
+UPDATE wb__{} SET completed=true WHERE job_id=%(job_id)s
 """
 
 SET_ROW_CLAIMED_BY_ID_QUERY = r"""
-UPDATE job_{} SET claimed=true WHERE job_id=%(job_id)s
+UPDATE wb__{} SET claimed=true WHERE job_id=%(job_id)s
 """
 
 TOTAL_ROWS_QUERY = r"""
-SELECT COUNT(*) FROM job_{0}
+SELECT COUNT(*) FROM wb__{0}
 """
 
 COMPLETED_ROWS_QUERY = r"""
-SELECT COUNT(*) FROM job_{0} WHERE completed=true
+SELECT COUNT(*) FROM wb__{0} WHERE completed=true
 """
 
 
