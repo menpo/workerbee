@@ -40,7 +40,7 @@ arbitrary dictionary of extra data per job - this can be useful for storing the 
 experiment for instance.
 
 Each worker independently tries to setup the experiment by creating the necessary tables in the database. 
-One will succeed - other's will fail but no this means another worker got their first. All bees then
+One will succeed - other's will fail but this just means another worker got there first. All bees then
 fall into a pattern of claiming a random `job_id` from the current experiment to work on. You provide the workerbee
 setup function with a `job_function` - this function will be invoked, passing in the current `job_id` and any associated
 `job_data` stored for this job in the database. If your `job_function` returns without error, the job will be marked `COMPLETE`
