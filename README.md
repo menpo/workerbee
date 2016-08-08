@@ -8,8 +8,8 @@ parallelizable experiments over computing clusters. Workerbee works best when
 you have:
 
 1. A Python script containing a single function you need to evaluate against many inputs, or **jobs**.
-2. A pre-existing cluster management system to spin up many instances of your script (e.g. HTCondor)
-3. A single shared database that all instances can see (e.g. a Postgres instance)
+2. A pre-existing cluster management system to spin up many instances of your script (e.g. a [HTCondor](https://research.cs.wisc.edu/htcondor/) setup)
+3. A single shared database that all instances can see (e.g. a [PostgreSQL](https://www.postgresql.org) instance)
 
 Workerbee runs **experiments** that are given a unique **`experiment_id`**. 
 Each Experiment contains a number of **jobs**, each given a unique string **`job_id`**.
@@ -49,8 +49,7 @@ in the database. If your job errors, the job will be retried by another worker a
 The experiment continues until all work is completed, at which point each worker independently comes to this realization
 and terminates.
 
-
-usage with Postgres
+Usage with Postgres
 -------------------
 
 For now the only database supported for workerbee is postgres. Here is a complete example to get you started:
