@@ -262,7 +262,7 @@ def postgres_experiment(experiment_id, job_function,
                 sys.stdout.write("claimed '{}'".format(a_row.job_id))
                 sys.stdout.flush()
             try:
-                job_function(a_row.job_id, data=a_row.data if a_row.data is not None else {})
+                job_function(a_row.job_id, a_row.data if a_row.data is not None else {})
             except JobFailed as e:
                 sys.stdout.write('FAILED.\n')
                 sys.stdout.flush()
