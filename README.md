@@ -100,7 +100,7 @@ All jobs are exhausted, terminating.
 ```
 Key takeaways:
 
-1. To use workerbee you need to form a function of the signature:
+1. To use workerbee you need to form a function with the signature:
 ```py
 def job_function(job_id, job_data):
     ...
