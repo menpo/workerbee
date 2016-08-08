@@ -7,7 +7,7 @@ from psycopg2.extras import Json as postgres_jsonify
 
 from .base import JobsExhaustedError, JobFailed
 
-from string import letters, digits
+from string import ascii_letters, digits
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(letters.lower()) | set(digits) | set('_')
 
 
