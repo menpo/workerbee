@@ -1,25 +1,31 @@
 from __future__ import division
+
+import logging
 import os
 import sys
 
+from itertools import zip_longest
+
+import time
 from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
 
-from .base import JobsExhaustedError, JobFailed
+from .base import JobsExhaustedError, JobFailed, DEFAULT_LOGGER, timer, \
+    exponential_decay
 
 from string import ascii_letters, digits
+if sys.version_info.major == 3:
+    string_types = (str,)
+else:
+    string_types = (basestring,)
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(ascii_letters.lower()) | set(digits) | set('_')
 
-
-def check_name(table_name):
-    if not isinstance(table_name, basestring):
-        raise TypeError("Experiment ID '{}' is of type {}, not string".format(
-            table_name, type(table_name)))
-    invalid = set(table_name) - ALLOWED_CHARACTERS_IN_TABLE_NAME
-    if len(invalid) > 0:
-        raise ValueError("Invalid characters in experiment ID: {} "
-                         "(allowed [a...z, 0...9, '_']".format(
-            ', '.join(["'{}'".format(l) for l in sorted(list(invalid))])))
+# According to the postgres.py documentation, we should only have a single
+# instantiation of the 'Postgres' class per database connection, per-process.
+# So we need an ugly global to store the handles - which will be instantiated
+# whenever the first db accessing method is called and is indexed by the
+# connection info.
+DB_HANDLES = {}
 
 
 ###############################################################################
@@ -28,166 +34,259 @@ TABLE_EXISTS_QUERY = r"""
 SELECT EXISTS(
     SELECT *
     FROM information_schema.tables
-    WHERE table_name = 'wb__{}'
+    WHERE table_name = '{tbl_name}'
 );
-"""
+""".strip()
 
 CREATE_TABLE_QUERY = r"""
-CREATE TABLE wb__{}(
-  job_id TEXT UNIQUE NOT NULL PRIMARY KEY,
-  data json,
-  completed BOOLEAN NOT NULL DEFAULT FALSE,
-  claimed BOOLEAN NOT NULL DEFAULT FALSE
+CREATE TABLE {tbl_name}(
+  id SERIAL PRIMARY KEY,
+  unique_id TEXT UNIQUE,
+  input_data json NOT NULL,
+  output_data json,
+  n_claims INTEGER NOT NULL DEFAULT 0,
+  time_last_completed TIMESTAMP WITH TIME ZONE,
+  time_last_claimed TIMESTAMP WITH TIME ZONE,
+  job_duration INTERVAL,
+  n_failed_attempts INTEGER NOT NULL DEFAULT 0
 )
-"""
+""".strip()
 
 INSERT_JOB_QUERY = r"""
-INSERT INTO wb__{0} (job_id) VALUES (%(job_id)s) RETURNING job_id
-"""
+INSERT INTO {tbl_name} (unique_id, input_data) VALUES (%(unique_id)s, %(input_data)s)
+""".strip()
 
-UPDATE_DATA_QUERY = r"""
-UPDATE wb__{0} SET data=%(data)s WHERE job_id=%(job_id)s
-"""
-
-RANDOM_UNCOMPLETED_UNCLAIMED_ROW_QUERY = r"""
+UNCOMPLETED_UNCLAIMED_ROW_QUERY = r"""
 SELECT *
-FROM wb__{0} WHERE completed=false AND claimed=false OFFSET floor(random() * (
-    SELECT COUNT(*) FROM wb__{0} WHERE completed=false AND claimed=false
-))
+FROM {tbl_name} WHERE time_last_completed ISNULL AND time_last_claimed ISNULL
 LIMIT 1;
-"""
+""".strip()
 
-RANDOM_UNCOMPLETED_ROW_QUERY = r"""
+OLDEST_UNCOMPLETED_ROW_QUERY = r"""
 SELECT *
-FROM wb__{0} WHERE completed=false OFFSET floor(random() * (
-    SELECT COUNT(*) FROM wb__{0} WHERE completed=false
-))
+FROM {tbl_name}
+WHERE time_last_completed ISNULL AND n_failed_attempts < %(max_n_retry_attempts)s
+ORDER BY time_last_claimed
 LIMIT 1;
-"""
+""".strip()
 
 SET_ROW_COMPLETED_BY_ID_QUERY = r"""
-UPDATE wb__{} SET completed=true WHERE job_id=%(job_id)s
-"""
+UPDATE {tbl_name}
+SET time_last_completed=CURRENT_TIMESTAMP, output_data=%(output_data)s, job_duration=%(job_duration)s
+WHERE id=%(id)s
+""".strip()
 
 SET_ROW_CLAIMED_BY_ID_QUERY = r"""
-UPDATE wb__{} SET claimed=true WHERE job_id=%(job_id)s
-"""
+UPDATE {tbl_name} SET time_last_claimed=CURRENT_TIMESTAMP, n_claims = n_claims + 1
+WHERE id=%(id)s
+""".strip()
+
+UPDATE_ROW_N_FAILED_ATTEMPTS_BY_ID_QUERY = r"""
+UPDATE {tbl_name} SET n_failed_attempts = n_failed_attempts + 1
+WHERE id=%(id)s
+""".strip()
 
 TOTAL_ROWS_QUERY = r"""
-SELECT COUNT(*) FROM wb__{0}
-"""
+SELECT COUNT(*) FROM {tbl_name}
+""".strip()
 
 COMPLETED_ROWS_QUERY = r"""
-SELECT COUNT(*) FROM wb__{0} WHERE completed=true
-"""
+SELECT COUNT(*) FROM {tbl_name} WHERE time_last_completed NOTNULL
+""".strip()
 
 
 ###############################################################################
-def table_exists(db_handle, table_id):
-    return db_handle.one(TABLE_EXISTS_QUERY.format(table_id))
 
 
-def setup_table(db_handle, experiment_id, job_ids=None, job_data=None,
-                verbose=False):
-    check_name(experiment_id)
-    does_table_exist = table_exists(db_handle, experiment_id)
+class DBConnectionInfo(object):
 
-    if job_data is None:
-        job_data = {}
-    if job_ids is not None:
-        extra_job_data = set(job_data) - set(job_ids)
-        if len(extra_job_data) > 0:
-            raise ValueError("job_data provided for {} job IDs that aren't in this "
-                             "experiment: {}".format(len(extra_job_data),
-                                                     list(extra_job_data)))
-    if does_table_exist:
-        if verbose:
-            print("Table already exists for experiment '{}'".format(experiment_id))
-            if job_ids is not None:
-                print('Warning: {} provided job IDs were ignored (presumably '
-                      'they are already in the table?)'.format(len(job_ids)))
+    def __init__(self, host=None, port=None, user=None, database=None):
+        self.host = host or os.environ.get('PGHOST', None)
+        self.port = port or os.environ.get('PGPORT', None)
+        self.user = user or os.environ.get('PGUSER', None)
+        self.database = database or os.environ.get('PGDATABASE', None)
+
+    def missing_info(self):
+        return None in {self.host, self.port, self.database, self.user}
+
+    def postgres_connection_string(self):
+        return 'host={} port={} user={} dbname={}'.format(
+            self.host, self.port, self.user, self.database)
+
+    def __eq__(self, other):
+        return (isinstance(other, self.__class__) and
+                self.__dict__ == other.__dict__)
+
+    def __hash__(self):
+        # Ensure that objects with the same connection info will hash the same
+        return hash((self.host, self.port, self.user, self.database))
+
+    def __str__(self):
+        return '{} on {}@{}:{}'.format(self.database, self.user, self.host,
+                                       self.port)
+
+
+def get_db_handle(db_info=None, logger_name=DEFAULT_LOGGER):
+    if db_info is None:
+        db_info = DBConnectionInfo()
+
+    if db_info in DB_HANDLES:
+        handle = DB_HANDLES[db_info]
     else:
-        if verbose:
-            print("Creating table for experiment '{}'...".format(experiment_id))
-        with db_handle.get_cursor() as cursor:  # Single Transaction
-            # Create table
-            cursor.run(CREATE_TABLE_QUERY.format(experiment_id))
-            if verbose:
-                print("Adding {} jobs to experiment "
-                      "'{}'...".format(len(job_ids), experiment_id))
-                if verbose:
-                    if len(job_data) > 0:
-                        print('job_data provided for {} jobs'.format(len(job_data)))
-                    else:
-                        print('no job_data provided.')
-            # Fill in list of jobs
-            for job_id in job_ids:
-                cursor.one(INSERT_JOB_QUERY.format(experiment_id),
-                           parameters={'job_id': job_id})
-                if job_id in job_data:
-                    cursor.run(UPDATE_DATA_QUERY.format(experiment_id),
-                               parameters={'data': postgres_jsonify(job_data[job_id]),
-                                           'job_id': job_id})
-        if verbose:
-            print("Experiment '{}' set up.".format(experiment_id))
-    if verbose:
-        print('-' * 80)
-    return not does_table_exist
+        if db_info.missing_info():
+            raise ValueError('Unable to find the database configuration in the '
+                             'local environment.')
 
-
-def create_db_handle(host=None, port=None, user=None, database=None,
-                     logger=None):
-    host = host or os.environ.get('PGHOST', None)
-    port = port or os.environ.get('PGPORT', None)
-    user = user or os.environ.get('PGUSER', None)
-    database = database or os.environ.get('PGDATABASE', None)
-    if None in {host, port, database, user}:
-        raise ValueError('Unable to find the database configuration in the '
-                         'local environment.')
-    if logger:
-        logger.info('Connecting to database {} on {}@{}:{}...'.format(
-            database, user, host, port))
+        logger = logging.getLogger(logger_name)
+        logger.info('Creating connection pool for {}'.format(db_info))
         if 'PGPASS' in os.environ:
-            logger.info(' - Password is set via environment variable PGPASS.')
+            logger.info('Password is set via environment variable PGPASS.')
         else:
-            logger.warn(' - No password is set. (If needed, set the '
+            logger.warn('No password is set. (If needed, set the '
                         'environment variable PGPASS.)')
-    return Postgres('host={} port={} user={} dbname={}'.format(host, port, user,
-                                                               database))
+
+        DB_HANDLES[db_info] = Postgres(db_info.postgres_connection_string())
+        handle = DB_HANDLES[db_info]
+    return handle
 
 
-def get_random_uncompleted_unclaimed_job(db_handle, table_id):
-    return db_handle.one(RANDOM_UNCOMPLETED_UNCLAIMED_ROW_QUERY.format(table_id))
+def check_valid_table_name(table_name):
+    if not isinstance(table_name, string_types):
+        raise TypeError("Experiment ID '{}' is of type {}, not string".format(
+            table_name, type(table_name)))
+    invalid = set(table_name) - ALLOWED_CHARACTERS_IN_TABLE_NAME
+    if len(invalid) > 0:
+        invalid_c = ', '.join(["'{}'".format(l) for l in sorted(list(invalid))])
+        raise ValueError("Invalid characters in experiment ID: {} "
+                         "(allowed [a-z0-9_]+)".format(invalid_c))
 
 
-def get_random_uncompleted_job(db_handle, table_id):
-    return db_handle.one(RANDOM_UNCOMPLETED_ROW_QUERY.format(table_id))
+def table_exists(db_handle, tbl_name):
+    return db_handle.one(TABLE_EXISTS_QUERY.format(tbl_name=tbl_name))
 
 
-def set_job_as_complete(db_handle, table_id, job_id):
-    db_handle.run(SET_ROW_COMPLETED_BY_ID_QUERY.format(table_id),
-                  parameters={'job_id': job_id})
+def get_uncompleted_unclaimed_job(db_handle, tbl_name):
+    return db_handle.one(UNCOMPLETED_UNCLAIMED_ROW_QUERY.format(tbl_name=tbl_name))
 
 
-def set_job_as_claimed(db_handle, table_id, job_id):
-    db_handle.run(SET_ROW_CLAIMED_BY_ID_QUERY.format(table_id),
-                  parameters={'job_id': job_id})
+def get_oldest_uncompleted_job(db_handle, tbl_name, max_n_retry_attempts):
+    return db_handle.one(OLDEST_UNCOMPLETED_ROW_QUERY.format(tbl_name=tbl_name),
+                         parameters={'max_n_retry_attempts': max_n_retry_attempts})
 
 
-def get_total_job_count(db_handle, table_id):
-    return db_handle.one(TOTAL_ROWS_QUERY.format(table_id))
+def set_job_as_complete(db_handle, tbl_name, job_id, duration,
+                        output_data=None):
+    if output_data is not None:
+        output_data = postgres_jsonify(output_data)
+    db_handle.run(SET_ROW_COMPLETED_BY_ID_QUERY.format(tbl_name=tbl_name),
+                  parameters={'id': job_id, 'job_duration': duration,
+                              'output_data': output_data})
 
 
-def get_completed_job_count(db_handle, table_id):
-    return db_handle.one(COMPLETED_ROWS_QUERY.format(table_id))
+def set_job_as_claimed(db_handle, tbl_name, job_id):
+    db_handle.run(SET_ROW_CLAIMED_BY_ID_QUERY.format(tbl_name=tbl_name),
+                  parameters={'id': job_id})
+
+
+def update_job_n_failed_attempts(db_handle, tbl_name, job_id):
+    db_handle.run(UPDATE_ROW_N_FAILED_ATTEMPTS_BY_ID_QUERY.format(tbl_name=tbl_name),
+                  parameters={'id': job_id})
+
+
+def get_total_job_count(db_handle, tbl_name):
+    return db_handle.one(TOTAL_ROWS_QUERY.format(tbl_name=tbl_name))
+
+
+def get_completed_job_count(db_handle, tbl_name):
+    return db_handle.one(COMPLETED_ROWS_QUERY.format(tbl_name=tbl_name))
 
 ################################################################################
 
 
-def postgres_experiment(experiment_id, job_function,
-                        job_ids=None, job_data=None,
-                        host=None, port=None, user=None, database=None,
-                        verbose=True):
+def add_job(experiment_id, input_data, unique_id=None, db_connection_info=None,
+            logger_name=DEFAULT_LOGGER, cursor=None):
+    query_str = INSERT_JOB_QUERY.format(tbl_name=experiment_id)
+    params = {'parameters': {'unique_id': unique_id,
+                             'input_data': postgres_jsonify(input_data)}}
+    if cursor is None:
+        db_handle = get_db_handle(db_info=db_connection_info,
+                                  logger_name=logger_name)
+
+        if not table_exists(db_handle, experiment_id):
+            raise ValueError("Table does not exist for experiment '{}'".format(
+                experiment_id))
+
+        db_handle.run(query_str, **params)
+    else:
+        cursor.run(query_str, **params)
+
+
+def add_jobs(experiment_id, input_datas, unique_ids=None,
+             db_connection_info=None, logger_name=DEFAULT_LOGGER, cursor=None):
+    logger = logging.getLogger(logger_name)
+    if cursor is None:
+        db_handle = get_db_handle(db_info=db_connection_info,
+                                  logger_name=logger_name)
+
+        if not table_exists(db_handle, experiment_id):
+            raise ValueError("Table does not exist for experiment '{}'".format(
+                experiment_id))
+
+        with db_handle.get_cursor() as cursor:
+            for input_data, unique_id in zip_longest(input_datas, unique_ids):
+                add_job(experiment_id, input_data, unique_id=unique_id,
+                        db_connection_info=db_connection_info,
+                        logger_name=logger_name, cursor=cursor)
+    else:
+        for input_data, unique_id in zip_longest(input_datas, unique_ids):
+            add_job(experiment_id, input_data, unique_id=unique_id,
+                    db_connection_info=db_connection_info,
+                    logger_name=logger_name, cursor=cursor)
+    logger.info('Submitted {} jobs'.format(len(input_datas)))
+
+
+def setup_experiment(experiment_id, input_datas, unique_ids=None,
+                     db_connection_info=None, logger_name=DEFAULT_LOGGER):
+    if unique_ids is None:
+        unique_ids = []
+
+    db_handle = get_db_handle(db_info=db_connection_info,
+                              logger_name=logger_name)
+    logger = logging.getLogger(logger_name)
+
+    check_valid_table_name(experiment_id)
+    does_table_exist = table_exists(db_handle, experiment_id)
+
+    if unique_ids:
+        if len(unique_ids) != len(input_datas):
+            msg = ('Must provide a unique ID per job if unique_ids is '
+                   'provided. ({} unique ids, {} jobs)'.format(len(unique_ids),
+                                                               len(input_datas)))
+            logger.critical(msg)
+            raise ValueError(msg)
+
+    if does_table_exist:
+        logger.warn("Table already exists for experiment '{}'".format(experiment_id))
+    else:
+        logger.info("Creating table for experiment '{}'".format(experiment_id))
+        with db_handle.get_cursor() as cursor:  # Single Transaction
+            # Create table
+            cursor.run(CREATE_TABLE_QUERY.format(tbl_name=experiment_id))
+            logger.info("Adding {} jobs to experiment '{}'".format(
+                len(input_datas), experiment_id))
+
+            # Fill in list of jobs
+            add_jobs(experiment_id, input_datas, unique_ids=unique_ids,
+                     db_connection_info=db_connection_info,
+                     logger_name=logger_name, cursor=cursor)
+        logger.info("Experiment '{}' set up with {} jobs.".format(
+            experiment_id, len(input_datas)))
+
+
+def postgres_worker(experiment_id, job_function, db_connection_info=None,
+                    logger_name=DEFAULT_LOGGER, busywait=False,
+                    max_busywait_sleep=None, max_failure_sleep=None,
+                    max_n_retry_attempts=10):
     """
 
     Parameters
@@ -195,92 +294,68 @@ def postgres_experiment(experiment_id, job_function,
     experiment_id : `str`
         A unique identifier for an experiment. Must be a valid Postgres Table
         name (no whitespace etc).
-    job_function : `callable` taking (job_id: str, job_data : {})
+    job_function : `callable` taking (job_data : {})
         A callable that performs a unit of work in this experiment. The
-        function will be provided with two arguments - the ``job_id`` for this
+        function will be provided with two arguments - the ``id`` for this
         job (a string) and the data payload for this job (a dictionary). This
-        function then uses these inputs to perform the relevent work for the
+        function then uses these inputs to perform the relevant work for the
         experiment. If the function completes without error, the job will be
         automatically marked complete in the database.
-    job_ids : `list` of `str`, optional if experiment_id exists.
-        A list of Job IDs to be used in this experiment. If the experiment
-        already exists, these jobs will be ignored. If the experiment ID
-        doesn't exist yet, the experiment will be created with these jobs.
-    job_data : `dict` with `str` keys pointing to `dict`s, optional
-        An optional dictionary of extra data that can be stored per-job. This
-        dictionary's top-level keys should be job_id's. top-level values
-        should be dictionaries of basic datatypes. This dictionary can for
-        example store experiment parameters that should be used for the job
-        in question.
-    host : `str`, optional
-        The hostname of the Postgres instance. If ``None``, the environment
-        variable ``PGHOST`` will be used if set.
-    port : `str`, optional
-        The port which the Postgres instance is running on. If ``None``, the
-        environment variable ``PGPORT`` will be used if set.
-    user : `str`, optional
-        The Postgres user to join as. If ``None``, the
-        environment variable ``PGUSER`` will be used if set.
-    database : `str`, optional
-        The database of the Postgres server to use. If ``None``, the
-        environment variable ``PGDATABASE`` will be used if set.
-    verbose : `bool`, optional
-        If ``True``, additional logging will be provided.
     """
-    db_handle = create_db_handle(host=host, port=port, user=user,
-                                 database=database, verbose=verbose)
-    if job_ids is not None:
-        setup_table(db_handle, experiment_id, job_ids=job_ids,
-                    job_data=job_data, verbose=verbose)
-    else:
-        if not table_exists(db_handle, experiment_id):
-            raise ValueError('Job IDs were not provided and the given '
-                             'Experiment ID "{}" does not exist.'.format(experiment_id))
-    n_inputs = get_total_job_count(db_handle, experiment_id)
-    if verbose:
-        i = 0
+    db_handle = get_db_handle(db_info=db_connection_info,
+                              logger_name=logger_name)
+    logger = logging.getLogger(logger_name)
+    busywait_decay = exponential_decay(max_value=max_busywait_sleep)
+    fail_decay = exponential_decay(max_value=max_failure_sleep)
+
     try:
         while True:
-            if verbose:
-                sys.stdout.write(str(i) + ': ')
-                sys.stdout.flush()
-            a_row = get_random_uncompleted_unclaimed_job(db_handle, experiment_id)
+            a_row = get_uncompleted_unclaimed_job(db_handle,
+                                                  experiment_id)
             if a_row is None:
                 # there is nothing left that is unclaimed, so we may as well
                 # 'repeat' already claimed work - maybe we can beat another
-                # bee to complete it.
-                a_row = get_random_uncompleted_job(db_handle, experiment_id)
-                if verbose:
-                    sys.stdout.write("no unclaimed work remains - ")
-                    sys.stdout.flush()
+                # worker to complete it.
+                logger.info('No unclaimed work remains - re-claiming oldest job')
+                a_row = get_oldest_uncompleted_job(db_handle, experiment_id,
+                                                   max_n_retry_attempts)
 
             if a_row is None:
-                raise JobsExhaustedError()
-
-            # let's claim the job
-            set_job_as_claimed(db_handle, experiment_id, a_row.job_id)
-
-            if verbose:
-                sys.stdout.write("claimed '{}'".format(a_row.job_id))
-                sys.stdout.flush()
-            try:
-                job_function(a_row.job_id, a_row.data if a_row.data is not None else {})
-            except JobFailed as e:
-                sys.stdout.write('FAILED.\n')
-                sys.stdout.flush()
+                if busywait:
+                    d = next(busywait_decay)
+                    logger.info('No uncompleted work - busywait with binary '
+                                'exponential decay ({} seconds)'.format(d))
+                    time.sleep(d)
+                else:
+                    raise JobsExhaustedError()
             else:
-                set_job_as_complete(db_handle, experiment_id, a_row.job_id)
-                if verbose:
-                    sys.stdout.write('...done.\n')
-                    sys.stdout.flush()
-            if verbose:
-                i += 1
-                if i % 10 == 0:
-                    n_completed_rows = get_completed_job_count(db_handle,
-                                                               experiment_id)
-                    print('{:.2f}% ({}/{}) Completed'.format(
-                        (n_completed_rows / n_inputs) * 100,
-                        n_completed_rows, n_inputs))
+                # Reset the busywait
+                busywait_decay = exponential_decay(max_value=max_busywait_sleep)
+
+                # let's claim the job
+                set_job_as_claimed(db_handle, experiment_id, a_row.id)
+
+                logger.info('Claimed job (id: {})'.format(a_row.id))
+                try:
+                    with timer() as t:
+                        output_data = job_function(a_row.input_data,
+                                                   unique_id=a_row.unique_id)
+                except JobFailed as e:
+                    d = next(fail_decay)
+                    update_job_n_failed_attempts(db_handle, experiment_id, a_row.id)
+                    logger.warn('Failed to complete job (id: {}) - sleeping '
+                                'with binary exponential decay ({} seconds)'.format(
+                                    a_row.id, d))
+                    time.sleep(d)
+                else:
+                    # Reset the failure decay
+                    fail_decay = exponential_decay(max_value=max_failure_sleep)
+
+                    # Update the job information
+                    set_job_as_complete(db_handle, experiment_id,
+                                        a_row.id, t.interval,
+                                        output_data=output_data)
+                    logger.info('Completed job (id: {}) in {:.2f} seconds'.format(
+                        a_row.id, t.interval.total_seconds()))
     except JobsExhaustedError:
-        sys.stdout.write('\rAll jobs are exhausted, terminating.')
-        sys.stdout.flush()
+        logger.info('All jobs are exhausted, terminating.')
