@@ -4,8 +4,6 @@ import logging
 import os
 import sys
 
-from itertools import zip_longest
-
 import time
 from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
@@ -15,8 +13,10 @@ from .base import JobsExhaustedError, JobFailed, DEFAULT_LOGGER, timer, \
 
 from string import ascii_letters, digits
 if sys.version_info.major == 3:
+    from itertools import zip_longest
     string_types = (str,)
 else:
+    from itertools import izip_longest as zip_longest
     string_types = (basestring,)
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(ascii_letters.lower()) | set(digits) | set('_')
 
