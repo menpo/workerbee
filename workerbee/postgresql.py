@@ -135,23 +135,25 @@ def setup_table(db_handle, experiment_id, job_ids=None, job_data=None,
     return not does_table_exist
 
 
-def create_db_handle(host=None, port=None, user=None, database=None, verbose=False):
-    if host is None:
-        host = os.environ['PGHOST']
-    if port is None:
-        port = os.environ['PGPORT']
-    if user is None:
-        user = os.environ['PGUSER']
-    if database is None:
-        database = os.environ['PGDATABASE']
-    if verbose:
-        print('Connecting to database {} on {}@{}:{}...'.format(database, user, host, port))
+def create_db_handle(host=None, port=None, user=None, database=None,
+                     logger=None):
+    host = host or os.environ.get('PGHOST', None)
+    port = port or os.environ.get('PGPORT', None)
+    user = user or os.environ.get('PGUSER', None)
+    database = database or os.environ.get('PGDATABASE', None)
+    if None in {host, port, database, user}:
+        raise ValueError('Unable to find the database configuration in the '
+                         'local environment.')
+    if logger:
+        logger.info('Connecting to database {} on {}@{}:{}...'.format(
+            database, user, host, port))
         if 'PGPASS' in os.environ:
-            print(' - Password is set via environment variable PGPASS.')
+            logger.info(' - Password is set via environment variable PGPASS.')
         else:
-            print(' - No password is set. (If needed, set the environment '
-                  'variable PGPASS.)')
-    return Postgres("host={} port={} user={} dbname={} ".format(host, port, user, database))
+            logger.warn(' - No password is set. (If needed, set the '
+                        'environment variable PGPASS.)')
+    return Postgres('host={} port={} user={} dbname={}'.format(host, port, user,
+                                                               database))
 
 
 def get_random_uncompleted_unclaimed_job(db_handle, table_id):
