@@ -2,9 +2,11 @@ from __future__ import division
 
 import logging
 import os
+import subprocess
 import sys
-
 import time
+
+from distutils.version import StrictVersion
 from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
 
@@ -13,12 +15,11 @@ from .base import JobsExhaustedError, JobFailed, DEFAULT_LOGGER, timer, \
 
 from string import ascii_letters, digits
 if sys.version_info.major == 3:
-    from itertools import zip_longest
     string_types = (str,)
 else:
-    from itertools import izip_longest as zip_longest
     string_types = (basestring,)
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(ascii_letters.lower()) | set(digits) | set('_')
+JSONB_POSTGRES_VER = StrictVersion('9.4')
 
 # According to the postgres.py documentation, we should only have a single
 # instantiation of the 'Postgres' class per database connection, per-process.
@@ -41,9 +42,8 @@ SELECT EXISTS(
 CREATE_TABLE_QUERY = r"""
 CREATE TABLE {tbl_name}(
   id SERIAL PRIMARY KEY,
-  unique_id TEXT UNIQUE,
-  input_data json NOT NULL,
-  output_data json,
+  input_data JSON{jsonb} NOT NULL,
+  output_data JSON,
   n_claims INTEGER NOT NULL DEFAULT 0,
   time_last_completed TIMESTAMP WITH TIME ZONE,
   time_last_claimed TIMESTAMP WITH TIME ZONE,
@@ -53,7 +53,7 @@ CREATE TABLE {tbl_name}(
 """.strip()
 
 INSERT_JOB_QUERY = r"""
-INSERT INTO {tbl_name} (unique_id, input_data) VALUES (%(unique_id)s, %(input_data)s)
+INSERT INTO {tbl_name} (input_data) VALUES (%(input_data)s)
 """.strip()
 
 UNCOMPLETED_UNCLAIMED_ROW_QUERY = r"""
@@ -126,6 +126,12 @@ class DBConnectionInfo(object):
                                        self.port)
 
 
+def get_postgres_version():
+    output = subprocess.check_output(['psql', '--version']).decode('utf-8')
+    # Slice off version. Example expected output: psql (PostgreSQL) 9.3.14
+    return StrictVersion(output.split(' ')[-1])
+
+
 def get_db_handle(db_info=None, logger_name=DEFAULT_LOGGER):
     if db_info is None:
         db_info = DBConnectionInfo()
@@ -163,6 +169,24 @@ def check_valid_table_name(table_name):
 
 def table_exists(db_handle, tbl_name):
     return db_handle.one(TABLE_EXISTS_QUERY.format(tbl_name=tbl_name))
+
+
+def create_table(db_handle, tbl_name, logger_name=DEFAULT_LOGGER):
+    logger = logging.getLogger(logger_name)
+    pg_ver = get_postgres_version()
+    # If Postgres >= 9.4 then create use jsonb as the 'input_data' data type
+    if pg_ver>= JSONB_POSTGRES_VER:
+        jsonb_input = 'b'
+        logger.info('Found Postgresql version {} - Using JSONB as the data '
+                    'type for the input_data field. UNIQUE constraints will '
+                    'be enforced on input_data.'.format(pg_ver))
+    else:
+        jsonb_input = ''
+        logger.warn('Found Postgresql version {} - Using JSON as the data '
+                    'type for the input_data field. UNIQUE constraints will '
+                    'NOT be enforced on input_data.'.format(pg_ver))
+    db_handle.run(CREATE_TABLE_QUERY.format(tbl_name=tbl_name,
+                                            jsonb=jsonb_input))
 
 
 def get_uncompleted_unclaimed_job(db_handle, tbl_name):
@@ -203,11 +227,10 @@ def get_completed_job_count(db_handle, tbl_name):
 ################################################################################
 
 
-def add_job(experiment_id, input_data, unique_id=None, db_connection_info=None,
+def add_job(experiment_id, input_data, db_connection_info=None,
             logger_name=DEFAULT_LOGGER, cursor=None):
     query_str = INSERT_JOB_QUERY.format(tbl_name=experiment_id)
-    params = {'parameters': {'unique_id': unique_id,
-                             'input_data': postgres_jsonify(input_data)}}
+    params = {'parameters': {'input_data': postgres_jsonify(input_data)}}
     if cursor is None:
         db_handle = get_db_handle(db_info=db_connection_info,
                                   logger_name=logger_name)
@@ -221,8 +244,8 @@ def add_job(experiment_id, input_data, unique_id=None, db_connection_info=None,
         cursor.run(query_str, **params)
 
 
-def add_jobs(experiment_id, input_datas, unique_ids=None,
-             db_connection_info=None, logger_name=DEFAULT_LOGGER, cursor=None):
+def add_jobs(experiment_id, input_datas, db_connection_info=None,
+             logger_name=DEFAULT_LOGGER, cursor=None):
     logger = logging.getLogger(logger_name)
     if cursor is None:
         db_handle = get_db_handle(db_info=db_connection_info,
@@ -233,23 +256,20 @@ def add_jobs(experiment_id, input_datas, unique_ids=None,
                 experiment_id))
 
         with db_handle.get_cursor() as cursor:
-            for input_data, unique_id in zip_longest(input_datas, unique_ids):
-                add_job(experiment_id, input_data, unique_id=unique_id,
+            for input_data in input_datas:
+                add_job(experiment_id, input_data,
                         db_connection_info=db_connection_info,
                         logger_name=logger_name, cursor=cursor)
     else:
-        for input_data, unique_id in zip_longest(input_datas, unique_ids):
-            add_job(experiment_id, input_data, unique_id=unique_id,
+        for input_data in input_datas:
+            add_job(experiment_id, input_data,
                     db_connection_info=db_connection_info,
                     logger_name=logger_name, cursor=cursor)
     logger.info('Submitted {} jobs'.format(len(input_datas)))
 
 
-def setup_experiment(experiment_id, input_datas, unique_ids=None,
-                     db_connection_info=None, logger_name=DEFAULT_LOGGER):
-    if unique_ids is None:
-        unique_ids = []
-
+def setup_experiment(experiment_id, input_datas, db_connection_info=None,
+                     logger_name=DEFAULT_LOGGER):
     db_handle = get_db_handle(db_info=db_connection_info,
                               logger_name=logger_name)
     logger = logging.getLogger(logger_name)
@@ -257,26 +277,19 @@ def setup_experiment(experiment_id, input_datas, unique_ids=None,
     check_valid_table_name(experiment_id)
     does_table_exist = table_exists(db_handle, experiment_id)
 
-    if unique_ids:
-        if len(unique_ids) != len(input_datas):
-            msg = ('Must provide a unique ID per job if unique_ids is '
-                   'provided. ({} unique ids, {} jobs)'.format(len(unique_ids),
-                                                               len(input_datas)))
-            logger.critical(msg)
-            raise ValueError(msg)
-
     if does_table_exist:
         logger.warn("Table already exists for experiment '{}'".format(experiment_id))
     else:
         logger.info("Creating table for experiment '{}'".format(experiment_id))
         with db_handle.get_cursor() as cursor:  # Single Transaction
             # Create table
-            cursor.run(CREATE_TABLE_QUERY.format(tbl_name=experiment_id))
+            create_table(cursor, experiment_id)
+
             logger.info("Adding {} jobs to experiment '{}'".format(
                 len(input_datas), experiment_id))
 
             # Fill in list of jobs
-            add_jobs(experiment_id, input_datas, unique_ids=unique_ids,
+            add_jobs(experiment_id, input_datas,
                      db_connection_info=db_connection_info,
                      logger_name=logger_name, cursor=cursor)
         logger.info("Experiment '{}' set up with {} jobs.".format(
@@ -338,8 +351,7 @@ def postgres_worker(experiment_id, job_function, db_connection_info=None,
                 logger.info('Claimed job (id: {})'.format(a_row.id))
                 try:
                     with timer() as t:
-                        output_data = job_function(a_row.input_data,
-                                                   unique_id=a_row.unique_id)
+                        output_data = job_function(a_row.input_data)
                 except JobFailed as e:
                     d = next(fail_decay)
                     update_job_n_failed_attempts(db_handle, experiment_id, a_row.id)
