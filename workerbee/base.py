@@ -6,19 +6,19 @@ import sys
 from functools import partial
 
 
-DEFAULT_LOGGER = logging.getLogger('workerbee_default')
+DEFAULT_LOGGER = logging.getLogger('workerbee')
 # Clear default handlers (perhaps set my BasicConfig)
 DEFAULT_LOGGER.handlers = []
 stdout_handler = logging.StreamHandler(sys.stdout)
 stdout_handler.setLevel(logging.INFO)
 stdout_handler.setFormatter(
-    logging.Formatter('%(name)s - %(levelname)-8s (%(asctime)-5s): %(message)s',
+    logging.Formatter('%(levelname)-8s (%(asctime)-5s): %(message)s',
                       '%Y-%m-%d %H:%M:%S'))
 DEFAULT_LOGGER.addHandler(stdout_handler)
 DEFAULT_LOGGER.setLevel(logging.INFO)
 del stdout_handler
 # Replace with name so that we use getLogger
-DEFAULT_LOGGER = 'workerbee_default'
+DEFAULT_LOGGER = 'workerbee'
 
 
 class timer:
