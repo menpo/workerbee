@@ -5,19 +5,21 @@ import os
 import subprocess
 import sys
 import time
-
 from distutils.version import StrictVersion
+from string import ascii_letters, digits
+
+import psycopg2
 from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
 
-from .base import JobsExhaustedError, JobFailed, DEFAULT_LOGGER, timer, \
-    exponential_decay
+from .base import DEFAULT_LOGGER, exponential_decay, timer
+from .exceptions import JobFailed, JobsExhaustedError
 
-from string import ascii_letters, digits
 if sys.version_info.major == 3:
     string_types = (str,)
 else:
     string_types = (basestring,)
+
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(ascii_letters.lower()) | set(digits) | set('_')
 JSONB_POSTGRES_VER = StrictVersion('9.4')
 
@@ -128,9 +130,17 @@ class DBConnectionInfo(object):
         return hash((self.host, self.port, self.user, self.database))
 
     def __str__(self):
-        return '{db} on {user}{passw}@{host}:{port}'.format(
+        if self.password:
+            pass_len = len(self.password)
+            starred_pass = ('*' * (pass_len))
+            if pass_len > 3:
+                starred_pass = starred_pass[:-2] + self.password[-2:]
+            passw = ':{}'.format(starred_pass)
+        else:
+            passw = ''
+        return '{user}{passw}@{host}:{port}/{db}'.format(
             db=self.database, user=self.user, host=self.host, port=self.port,
-            passw=':{}'.format(self.password) if self.password else '')
+            passw=passw)
 
 
 def get_postgres_version():
@@ -198,34 +208,6 @@ def create_table(db_handle, tbl_name, logger_name=DEFAULT_LOGGER):
                                             jsonb=jsonb_input))
 
 
-def get_uncompleted_unclaimed_job(db_handle, tbl_name):
-    return db_handle.one(UNCOMPLETED_UNCLAIMED_ROW_QUERY.format(tbl_name=tbl_name))
-
-
-def get_oldest_uncompleted_job(db_handle, tbl_name, max_n_retry_attempts):
-    return db_handle.one(OLDEST_UNCOMPLETED_ROW_QUERY.format(tbl_name=tbl_name),
-                         parameters={'max_n_retry_attempts': max_n_retry_attempts})
-
-
-def set_job_as_complete(db_handle, tbl_name, job_id, duration,
-                        output_data=None):
-    if output_data is not None:
-        output_data = postgres_jsonify(output_data)
-    db_handle.run(SET_ROW_COMPLETED_BY_ID_QUERY.format(tbl_name=tbl_name),
-                  parameters={'id': job_id, 'job_duration': duration,
-                              'output_data': output_data})
-
-
-def set_job_as_claimed(db_handle, tbl_name, job_id):
-    db_handle.run(SET_ROW_CLAIMED_BY_ID_QUERY.format(tbl_name=tbl_name),
-                  parameters={'id': job_id})
-
-
-def update_job_n_failed_attempts(db_handle, tbl_name, job_id):
-    db_handle.run(UPDATE_ROW_N_FAILED_ATTEMPTS_BY_ID_QUERY.format(tbl_name=tbl_name),
-                  parameters={'id': job_id})
-
-
 def get_total_job_count(db_handle, tbl_name):
     return db_handle.one(TOTAL_ROWS_QUERY.format(tbl_name=tbl_name))
 
@@ -236,151 +218,144 @@ def get_completed_job_count(db_handle, tbl_name):
 ################################################################################
 
 
-def add_job(experiment_id, input_data, db_connection_info=None,
-            logger_name=DEFAULT_LOGGER, cursor=None):
-    query_str = INSERT_JOB_QUERY.format(tbl_name=experiment_id)
-    params = {'parameters': {'input_data': postgres_jsonify(input_data)}}
-    if cursor is None:
-        db_handle = get_db_handle(db_info=db_connection_info,
-                                  logger_name=logger_name)
+class PostgresqlJobSet(object):
+    def __init__(self, jobset_id, host=None, port=None, user=None,
+                 password=None, database=None, logger_name=DEFAULT_LOGGER):
+        self.jobset_id = jobset_id
+        self.logger_name = logger_name
+        self.logger = logging.getLogger(logger_name)
 
-        if not table_exists(db_handle, experiment_id):
-            raise ValueError("Table does not exist for experiment '{}'".format(
-                experiment_id))
+        # Validate jobset id is valid postgresql table name
+        check_valid_table_name(self.jobset_id)
 
-        db_handle.run(query_str, **params)
-    else:
-        cursor.run(query_str, **params)
+        self.db_connection_info = DBConnectionInfo(
+            host=host, port=port, user=user, password=password,
+            database=database)
+        self.db_handle = get_db_handle(self.db_connection_info,
+                                       logger_name=logger_name)
 
+    def setup_jobset(self, ignore_existing_jobset=False):
+        if self.does_jobset_exist() and not ignore_existing_jobset:
+            msg = "Table already exists for jobset '{}'".format(self.jobset_id)
+            self.logger.error(msg)
+            raise ValueError(msg)
+        else:
+            try:
+                create_table(self.db_handle, self.jobset_id)
+                self.logger.info("Created table for jobset '{}'".format(
+                    self.jobset_id))
+            except psycopg2.ProgrammingError as e:
+                if not ignore_existing_jobset:
+                    # Re-raise - otherwise swallow
+                    raise e
+                else:
+                    self.logger.warn("Table already exists for jobset '{}' - "
+                                     "but ignoring".format(self.jobset_id))
 
-def add_jobs(experiment_id, input_datas, db_connection_info=None,
-             logger_name=DEFAULT_LOGGER, cursor=None):
-    logger = logging.getLogger(logger_name)
-    if cursor is None:
-        db_handle = get_db_handle(db_info=db_connection_info,
-                                  logger_name=logger_name)
+    def does_jobset_exist(self):
+        return table_exists(self.db_handle, self.jobset_id)
 
-        if not table_exists(db_handle, experiment_id):
-            raise ValueError("Table does not exist for experiment '{}'".format(
-                experiment_id))
+    def add_job(self, input_data, cursor=None):
+        query_str = INSERT_JOB_QUERY.format(tbl_name=self.jobset_id)
+        params = {'parameters': {'input_data': postgres_jsonify(input_data)}}
+        if cursor is None:
+            self.db_handle.run(query_str, **params)
+        else:
+            cursor.run(query_str, **params)
 
-        with db_handle.get_cursor() as cursor:
+    def add_jobs(self, input_datas, cursor=None):
+        if cursor is None:
+            with self.db_handle.get_cursor() as cursor:
+                for input_data in input_datas:
+                    self.add_job(input_data, cursor=cursor)
+        else:
             for input_data in input_datas:
-                add_job(experiment_id, input_data,
-                        db_connection_info=db_connection_info,
-                        logger_name=logger_name, cursor=cursor)
-    else:
-        for input_data in input_datas:
-            add_job(experiment_id, input_data,
-                    db_connection_info=db_connection_info,
-                    logger_name=logger_name, cursor=cursor)
-    logger.info('Submitted {} jobs'.format(len(input_datas)))
+                self.add_job(input_data, cursor=cursor)
+        self.logger.info('Submitted {} jobs'.format(len(input_datas)))
 
+    def set_job_as_complete(self, job_id, duration, output_data=None):
+        if output_data is not None:
+            output_data = postgres_jsonify(output_data)
+        params = {
+            'id': job_id,
+            'job_duration': duration,
+            'output_data': output_data
+        }
+        self.db_handle.run(SET_ROW_COMPLETED_BY_ID_QUERY.format(
+            tbl_name=self.jobset_id), parameters=params)
 
-def setup_experiment(experiment_id, input_datas, db_connection_info=None,
-                     logger_name=DEFAULT_LOGGER):
-    db_handle = get_db_handle(db_info=db_connection_info,
-                              logger_name=logger_name)
-    logger = logging.getLogger(logger_name)
+    def get_uncompleted_unclaimed_job(self):
+        return self.db_handle.one(UNCOMPLETED_UNCLAIMED_ROW_QUERY.format(
+            tbl_name=self.jobset_id))
 
-    check_valid_table_name(experiment_id)
-    does_table_exist = table_exists(db_handle, experiment_id)
+    def get_oldest_uncompleted_job(self, max_n_retry_attempts):
+        params = {'max_n_retry_attempts': max_n_retry_attempts}
+        return self.db_handle.one(OLDEST_UNCOMPLETED_ROW_QUERY.format(
+            tbl_name=self.jobset_id), parameters=params)
 
-    if does_table_exist:
-        logger.warn("Table already exists for experiment '{}'".format(experiment_id))
-    else:
-        logger.info("Creating table for experiment '{}'".format(experiment_id))
-        with db_handle.get_cursor() as cursor:  # Single Transaction
-            # Create table
-            create_table(cursor, experiment_id)
+    def update_job_n_failed_attempts(self, job_id):
+        self.db_handle.run(UPDATE_ROW_N_FAILED_ATTEMPTS_BY_ID_QUERY.format(
+            tbl_name=self.jobset_id), parameters={'id': job_id})
 
-            logger.info("Adding {} jobs to experiment '{}'".format(
-                len(input_datas), experiment_id))
+    def set_job_as_claimed(self, job_id):
+        self.db_handle.run(SET_ROW_CLAIMED_BY_ID_QUERY.format(
+            tbl_name=self.jobset_id), parameters={'id': job_id})
 
-            # Fill in list of jobs
-            add_jobs(experiment_id, input_datas,
-                     db_connection_info=db_connection_info,
-                     logger_name=logger_name, cursor=cursor)
-        logger.info("Experiment '{}' set up with {} jobs.".format(
-            experiment_id, len(input_datas)))
+    def run(self, job_callable, busywait=False,
+            max_busywait_sleep=None, max_failure_sleep=None,
+            max_n_retry_attempts=10):
+        busywait_decay = exponential_decay(max_value=max_busywait_sleep)
+        fail_decay = exponential_decay(max_value=max_failure_sleep)
 
+        try:
+            while True:
+                a_row = self.get_uncompleted_unclaimed_job()
+                if a_row is None:
+                    # there is nothing left that is unclaimed, so we may as well
+                    # 'repeat' already claimed work - maybe we can beat another
+                    # worker to complete it.
+                    self.logger.info('No unclaimed work remains - re-claiming '
+                                     'oldest job')
+                    a_row = self.get_oldest_uncompleted_job(max_n_retry_attempts)
 
-def postgres_worker(experiment_id, job_function, db_connection_info=None,
-                    logger_name=DEFAULT_LOGGER, busywait=False,
-                    max_busywait_sleep=None, max_failure_sleep=None,
-                    max_n_retry_attempts=10):
-    """
-
-    Parameters
-    ----------
-    experiment_id : `str`
-        A unique identifier for an experiment. Must be a valid Postgres Table
-        name (no whitespace etc).
-    job_function : `callable` taking (job_data : {})
-        A callable that performs a unit of work in this experiment. The
-        function will be provided with two arguments - the ``id`` for this
-        job (a string) and the data payload for this job (a dictionary). This
-        function then uses these inputs to perform the relevant work for the
-        experiment. If the function completes without error, the job will be
-        automatically marked complete in the database.
-    """
-    db_handle = get_db_handle(db_info=db_connection_info,
-                              logger_name=logger_name)
-    logger = logging.getLogger(logger_name)
-    busywait_decay = exponential_decay(max_value=max_busywait_sleep)
-    fail_decay = exponential_decay(max_value=max_failure_sleep)
-
-    if not table_exists(db_handle, experiment_id):
-        raise ValueError("Experiment '{}' does not exist - please run "
-                         "setup_experiment first".format(experiment_id))
-
-    try:
-        while True:
-            a_row = get_uncompleted_unclaimed_job(db_handle,
-                                                  experiment_id)
-            if a_row is None:
-                # there is nothing left that is unclaimed, so we may as well
-                # 'repeat' already claimed work - maybe we can beat another
-                # worker to complete it.
-                logger.info('No unclaimed work remains - re-claiming oldest job')
-                a_row = get_oldest_uncompleted_job(db_handle, experiment_id,
-                                                   max_n_retry_attempts)
-
-            if a_row is None:
-                if busywait:
-                    d = next(busywait_decay)
-                    logger.info('No uncompleted work - busywait with binary '
-                                'exponential decay ({} seconds)'.format(d))
-                    time.sleep(d)
+                if a_row is None:
+                    if busywait:
+                        d = next(busywait_decay)
+                        self.logger.info('No uncompleted work - busywait with '
+                                         'binary exponential decay '
+                                         '({} seconds)'.format(d))
+                        time.sleep(d)
+                    else:
+                        raise JobsExhaustedError()
                 else:
-                    raise JobsExhaustedError()
-            else:
-                # Reset the busywait
-                busywait_decay = exponential_decay(max_value=max_busywait_sleep)
+                    # Reset the busywait decay
+                    busywait_decay = exponential_decay(
+                        max_value=max_busywait_sleep)
 
-                # let's claim the job
-                set_job_as_claimed(db_handle, experiment_id, a_row.id)
+                    # let's claim the job
+                    self.set_job_as_claimed(a_row.id)
 
-                logger.info('Claimed job (id: {})'.format(a_row.id))
-                try:
-                    with timer() as t:
-                        output_data = job_function(a_row.input_data)
-                except JobFailed as e:
-                    d = next(fail_decay)
-                    update_job_n_failed_attempts(db_handle, experiment_id, a_row.id)
-                    logger.warn('Failed to complete job (id: {}) - sleeping '
-                                'with binary exponential decay ({} seconds)'.format(
-                                    a_row.id, d))
-                    time.sleep(d)
-                else:
-                    # Reset the failure decay
-                    fail_decay = exponential_decay(max_value=max_failure_sleep)
+                    self.logger.info('Claimed job (id: {})'.format(a_row.id))
+                    try:
+                        with timer() as t:
+                            output_data = job_callable(a_row.input_data)
+                    except JobFailed:
+                        d = next(fail_decay)
+                        self.update_job_n_failed_attempts(a_row.id)
+                        self.logger.warn('Failed to complete job (id: {}) - '
+                                         'sleeping with binary exponential '
+                                         'decay ({}s)'.format(a_row.id, d))
+                        time.sleep(d)
+                    else:
+                        # Reset the failure decay
+                        fail_decay = exponential_decay(
+                            max_value=max_failure_sleep)
 
-                    # Update the job information
-                    set_job_as_complete(db_handle, experiment_id,
-                                        a_row.id, t.interval,
-                                        output_data=output_data)
-                    logger.info('Completed job (id: {}) in {:.2f} seconds'.format(
-                        a_row.id, t.interval.total_seconds()))
-    except JobsExhaustedError:
-        logger.info('All jobs are exhausted, terminating.')
+                        # Update the job information
+                        self.set_job_as_complete(a_row.id, t.interval,
+                                                 output_data=output_data)
+                        total_secs = t.interval.total_seconds()
+                        self.logger.info('Completed job (id: {}) in {:.2f} '
+                                         'seconds'.format(a_row.id, total_secs))
+        except JobsExhaustedError:
+            self.logger.info('All jobs are exhausted, terminating.')
