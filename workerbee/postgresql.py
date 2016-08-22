@@ -100,30 +100,37 @@ SELECT COUNT(*) FROM {tbl_name} WHERE time_last_completed NOTNULL
 
 class DBConnectionInfo(object):
 
-    def __init__(self, host=None, port=None, user=None, database=None):
+    def __init__(self, host=None, port=None, user=None, password=None,
+                 database=None):
         self.host = host or os.environ.get('PGHOST', None)
         self.port = port or os.environ.get('PGPORT', None)
         self.user = user or os.environ.get('PGUSER', None)
         self.database = database or os.environ.get('PGDATABASE', None)
+        self.password = password
 
     def missing_info(self):
         return None in {self.host, self.port, self.database, self.user}
 
     def postgres_connection_string(self):
-        return 'host={} port={} user={} dbname={}'.format(
-            self.host, self.port, self.user, self.database)
+        conn_str = 'host={host} port={port} user={user} dbname={db}'.format(
+            db=self.database, user=self.user, host=self.host, port=self.port)
+        if self.password:
+            conn_str += ' password={}'.format(self.password)
+        return conn_str
 
     def __eq__(self, other):
         return (isinstance(other, self.__class__) and
                 self.__dict__ == other.__dict__)
 
     def __hash__(self):
+        # Don't hash on the password.
         # Ensure that objects with the same connection info will hash the same
         return hash((self.host, self.port, self.user, self.database))
 
     def __str__(self):
-        return '{} on {}@{}:{}'.format(self.database, self.user, self.host,
-                                       self.port)
+        return '{db} on {user}{passw}@{host}:{port}'.format(
+            db=self.database, user=self.user, host=self.host, port=self.port,
+            passw=':{}'.format(self.password) if self.password else '')
 
 
 def get_postgres_version():
@@ -145,11 +152,13 @@ def get_db_handle(db_info=None, logger_name=DEFAULT_LOGGER):
 
         logger = logging.getLogger(logger_name)
         logger.info('Creating connection pool for {}'.format(db_info))
-        if 'PGPASS' in os.environ:
-            logger.info('Password is set via environment variable PGPASS.')
+        if db_info.password is not None:
+            logger.warn('Password is set via keyword argument. Note that this '
+                        'is insecure and a ~/.pgpass file should be preferred.')
         else:
-            logger.warn('No password is set. (If needed, set the '
-                        'environment variable PGPASS.)')
+            logger.info('No password is set - the default behaviour of probing '
+                        'the ~/.pgpass or PGPASSWORD environment variable '
+                        'will be used.')
 
         DB_HANDLES[db_info] = Postgres(db_info.postgres_connection_string())
         handle = DB_HANDLES[db_info]
