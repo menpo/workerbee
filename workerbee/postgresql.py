@@ -321,6 +321,10 @@ def postgres_worker(experiment_id, job_function, db_connection_info=None,
     busywait_decay = exponential_decay(max_value=max_busywait_sleep)
     fail_decay = exponential_decay(max_value=max_failure_sleep)
 
+    if not table_exists(db_handle, experiment_id):
+        raise ValueError("Experiment '{}' does not exist - please run "
+                         "setup_experiment first".format(experiment_id))
+
     try:
         while True:
             a_row = get_uncompleted_unclaimed_job(db_handle,
