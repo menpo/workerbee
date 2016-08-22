@@ -20,6 +20,6 @@ setup(name='workerbee',
       author='The Menpo Team',
       author_email='hello@menpo.org',
       packages=find_packages(),
-      scripts=[join('bin', 'wbee')],
+      scripts=[join('bin', 'workerbee')],
       install_requires=requirements
 )
