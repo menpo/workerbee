@@ -21,6 +21,8 @@ else:
     string_types = (basestring,)
 
 ALLOWED_CHARACTERS_IN_TABLE_NAME = set(ascii_letters.lower()) | set(digits) | set('_')
+JSON_POSTGRES_MIN_VER = StrictVersion('9.2')
+JSON_POSTGRES_OP_VER = StrictVersion('9.3')
 JSONB_POSTGRES_VER = StrictVersion('9.4')
 
 # According to the postgres.py documentation, we should only have a single
@@ -33,12 +35,16 @@ DB_HANDLES = {}
 
 ###############################################################################
 
+POSTGRES_CHECK_VERSION = r"""
+SELECT version()
+"""
+
 TABLE_EXISTS_QUERY = r"""
 SELECT EXISTS(
     SELECT *
     FROM information_schema.tables
     WHERE table_name = '{tbl_name}'
-);
+)
 """.strip()
 
 CREATE_TABLE_QUERY = r"""
@@ -52,6 +58,15 @@ CREATE TABLE {tbl_name}(
   job_duration INTERVAL,
   n_failed_attempts INTEGER NOT NULL DEFAULT 0
 )
+""".strip()
+
+UNIQUE_INPUT_DATA_CONSTRAINT = r"""
+ALTER TABLE {tbl_name} ADD UNIQUE (input_data);
+""".strip()
+
+UNIQUE_INPUT_DATA_ID_CONSTRAINT = r"""
+CREATE UNIQUE INDEX {tbl_name}_uq_input_data_id
+ON {tbl_name} ((input_data ->> 'id'))
 """.strip()
 
 INSERT_JOB_QUERY = r"""
@@ -103,19 +118,19 @@ SELECT COUNT(*) FROM {tbl_name} WHERE time_last_completed NOTNULL
 class DBConnectionInfo(object):
 
     def __init__(self, host=None, port=None, user=None, password=None,
-                 database=None):
+                 dbname=None):
         self.host = host or os.environ.get('PGHOST', None)
         self.port = port or os.environ.get('PGPORT', None)
         self.user = user or os.environ.get('PGUSER', None)
-        self.database = database or os.environ.get('PGDATABASE', None)
+        self.dbname = dbname or os.environ.get('PGDATABASE', None)
         self.password = password
 
     def missing_info(self):
-        return None in {self.host, self.port, self.database, self.user}
+        return None in {self.host, self.port, self.dbname, self.user}
 
     def postgres_connection_string(self):
         conn_str = 'host={host} port={port} user={user} dbname={db}'.format(
-            db=self.database, user=self.user, host=self.host, port=self.port)
+            db=self.dbname, user=self.user, host=self.host, port=self.port)
         if self.password:
             conn_str += ' password={}'.format(self.password)
         return conn_str
@@ -127,7 +142,7 @@ class DBConnectionInfo(object):
     def __hash__(self):
         # Don't hash on the password.
         # Ensure that objects with the same connection info will hash the same
-        return hash((self.host, self.port, self.user, self.database))
+        return hash((self.host, self.port, self.user, self.dbname))
 
     def __str__(self):
         if self.password:
@@ -139,14 +154,15 @@ class DBConnectionInfo(object):
         else:
             passw = ''
         return '{user}{passw}@{host}:{port}/{db}'.format(
-            db=self.database, user=self.user, host=self.host, port=self.port,
+            db=self.dbname, user=self.user, host=self.host, port=self.port,
             passw=passw)
 
 
-def get_postgres_version():
-    output = subprocess.check_output(['psql', '--version']).decode('utf-8')
-    # Slice off version. Example expected output: psql (PostgreSQL) 9.3.14
-    return StrictVersion(output.split(' ')[-1])
+def get_postgres_version(db_handle):
+    pg_ver = db_handle.one(POSTGRES_CHECK_VERSION)
+    # Slice off version. Example expected output:
+    #   PostgreSQL 9.2.10 on x86_64-unknown-linux-gnu, compiled by gcc (Ubuntu/Linaro 4.6.3-1ubuntu5) 4.6.3, 64-bit
+    return StrictVersion(pg_ver.split(' ')[1])
 
 
 def get_db_handle(db_info=None, logger_name=DEFAULT_LOGGER):
@@ -187,25 +203,39 @@ def check_valid_table_name(table_name):
 
 
 def table_exists(db_handle, tbl_name):
-    return db_handle.one(TABLE_EXISTS_QUERY.format(tbl_name=tbl_name))
+    return db_handle.one(TABLE_EXISTS_QUERY.format(tbl_name=tbl_name),
+                         back_as=dict)
 
 
 def create_table(db_handle, tbl_name, logger_name=DEFAULT_LOGGER):
     logger = logging.getLogger(logger_name)
-    pg_ver = get_postgres_version()
+    pg_ver = get_postgres_version(db_handle)
+    if pg_ver < JSON_POSTGRES_MIN_VER:
+        raise ValueError('Minimum postgresql version requirement was not met '
+                         '({} < {})'.format(pg_ver, JSON_POSTGRES_MIN_VER))
     # If Postgres >= 9.4 then create use jsonb as the 'input_data' data type
-    if pg_ver>= JSONB_POSTGRES_VER:
+    if pg_ver >= JSONB_POSTGRES_VER:
         jsonb_input = 'b'
         logger.info('Found Postgresql version {} - Using JSONB as the data '
-                    'type for the input_data field. UNIQUE constraints will '
-                    'be enforced on input_data.'.format(pg_ver))
+                    'type for the input_data field.'.format(pg_ver))
     else:
         jsonb_input = ''
-        logger.warn('Found Postgresql version {} - Using JSON as the data '
-                    'type for the input_data field. UNIQUE constraints will '
-                    'NOT be enforced on input_data.'.format(pg_ver))
-    db_handle.run(CREATE_TABLE_QUERY.format(tbl_name=tbl_name,
-                                            jsonb=jsonb_input))
+        logger.info('Found Postgresql version {} - Using JSON as the data '
+                    'type for the input_data field.'.format(pg_ver))
+    with db_handle.get_cursor() as cursor:
+        cursor.run(CREATE_TABLE_QUERY.format(tbl_name=tbl_name,
+                                             jsonb=jsonb_input))
+        # If Postgres >= 9.3 then create a unique constraint on the reserved
+        # id key in the 'input_data'
+        if JSON_POSTGRES_OP_VER <= pg_ver < JSONB_POSTGRES_VER:
+            logger.info("Adding UNIQUE constraint to JSON field input_"
+                        "data->>'id'")
+            cursor.run(UNIQUE_INPUT_DATA_ID_CONSTRAINT.format(tbl_name=tbl_name))
+        elif pg_ver >= JSONB_POSTGRES_VER:
+            logger.info("Adding UNIQUE constraint to JSONB field input_data")
+            cursor.run(UNIQUE_INPUT_DATA_CONSTRAINT.format(tbl_name=tbl_name))
+        else:
+            logger.warn("NO UNIQUE constraint enforced")
 
 
 def get_total_job_count(db_handle, tbl_name):
@@ -220,7 +250,7 @@ def get_completed_job_count(db_handle, tbl_name):
 
 class PostgresqlJobSet(object):
     def __init__(self, jobset_id, host=None, port=None, user=None,
-                 password=None, database=None, logger_name=DEFAULT_LOGGER):
+                 password=None, dbname=None, logger_name=DEFAULT_LOGGER):
         self.jobset_id = jobset_id
         self.logger_name = logger_name
         self.logger = logging.getLogger(logger_name)
@@ -230,7 +260,7 @@ class PostgresqlJobSet(object):
 
         self.db_connection_info = DBConnectionInfo(
             host=host, port=port, user=user, password=password,
-            database=database)
+            dbname=dbname)
         self.db_handle = get_db_handle(self.db_connection_info,
                                        logger_name=logger_name)
 
