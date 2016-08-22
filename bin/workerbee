@@ -3,9 +3,9 @@
 """Report progress of a workerbee experiment
 
 Usage:
-  wbee <jobset_id> [--host=<host> --port=<port> --user=<user> --password=<password> --dbname=<dbname>]
-  wbee (--help)
-  wbee --version
+  workerbee <jobset_id> [--host=<host> --port=<port> --user=<user> --password=<password> -orkerbeename=<dbname>]
+  workerbee (--help)
+  workerbee --version
 
 Options:
   <jobset_id>             report progress for this set of jobs
