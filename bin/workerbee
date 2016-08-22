@@ -3,12 +3,12 @@
 """Report progress of a workerbee experiment
 
 Usage:
-  wbee <experiment_id> [--host=<host> --port=<port> --user=<user> --password=<password> --dbname=<dbname>]
+  wbee <jobset_id> [--host=<host> --port=<port> --user=<user> --password=<password> --dbname=<dbname>]
   wbee (--help)
   wbee --version
 
 Options:
-  <experiment_id>         report progress for this experiment
+  <jobset_id>             report progress for this set of jobs
   --host=<host>           database server host or socket directory
   --port=<port>           database server port
   --user=<user>           database user name
@@ -23,38 +23,38 @@ import curses
 import time
 
 import workerbee  # needed for version
-from workerbee.postgresql import DBConnectionInfo, get_db_handle
-from workerbee.stats import get_stats_report
+from workerbee import PostgresqlJobSet
 
 
-def load_db(host=None, user=None, password=None, database=None, port=None):
-    db_info = DBConnectionInfo(host=host, user=user, password=password, database=database, port=port)
-    return get_db_handle(db_info=db_info)
-
-
-def report_progress(db, experiment_id, scr):
+def report_progress(jobset, scr):
     title = 'workerbee'
     scr.addstr(1, 2, 'workerbee', curses.A_UNDERLINE) 
-    scr.addstr(1, 2 + len(title) + 2, experiment_id) 
-    report, stats = get_stats_report(db, experiment_id)
+    scr.addstr(1, 2 + len(title) + 2, jobset.jobset_id) 
+
+    scr.addstr(3, 2, str(jobset.db_connection_info))
+
+    report, stats = jobset._stats_report()
 
     h_width = max([len(r[0]) for r in report]) + 2
 
     i = 0
-    for i, (heading, value) in enumerate(report, 3):
+    for i, (heading, value) in enumerate(report, 5):
         heading_padded = heading.rjust(h_width - 1).ljust(h_width)
         scr.addstr(i, 0, heading_padded, curses.A_STANDOUT)
         scr.addstr(i, h_width + 1, value)
     
-    scr.addstr(i + 2, 1, "Press 'q' to quit")
+    scr.addstr(i + 2, 1, "Press 'q' to quit, 'r' to manually refresh")
     scr.refresh()
 
-    av_period_between_completions = (1 / stats.jobs_per_sec)
-     # refresh 4x more often than we expect changes (to look smoother)
-    return av_period_between_completions / 4
+    if stats.jobs_per_sec > 0:
+        av_period_between_completions = (1 / stats.jobs_per_sec)
+        # refresh 4x more often than we expect changes (to look smoother)
+        return av_period_between_completions / 4
+    else:
+        # refresh every 10 secs if no work is currently being done
+        return 10
 
-
-def curses_ui(db, experiment_id, stdscr):
+def curses_ui(jobset, stdscr):
     curses.halfdelay(1)
     curses.curs_set(0)
 
@@ -70,15 +70,20 @@ def curses_ui(db, experiment_id, stdscr):
         
         if time.time() - last_update > wait_time:
             last_update = time.time()
-            wait_time = report_progress(db, experiment_id, stdscr)
+            wait_time = report_progress(jobset, stdscr)
+        elif c == ord('r'):
+            # manual refresh
+            last_update = time.time()
+            wait_time = report_progress(jobset, stdscr)           
 
         time.sleep(0.1)
 
 
 if __name__ == "__main__":
     a = docopt(__doc__, version='workerbee v{}'.format(workerbee.__version__))
-    _db = load_db(host=a['--host'], user=a['--user'], 
-                  password=a['--password'], database=a['--dbname'], 
-                  port=a['--port'])
-    main_loop = partial(curses_ui, _db, a['<experiment_id>'])
+
+    main_loop = partial(curses_ui, PostgresqlJobSet(a['<jobset_id>'],
+        host=a['--host'], port=a['--port'], user=a['--user'],
+        password=a['--password'], dbname=a['--dbname']))
+    
     curses.wrapper(main_loop)

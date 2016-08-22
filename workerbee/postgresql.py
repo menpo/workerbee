@@ -2,7 +2,6 @@ from __future__ import division
 
 import logging
 import os
-import subprocess
 import sys
 import time
 from distutils.version import StrictVersion
@@ -14,6 +13,7 @@ from psycopg2.extras import Json as postgres_jsonify
 
 from .base import DEFAULT_LOGGER, exponential_decay, timer
 from .exceptions import JobFailed, JobsExhaustedError
+from .stats import get_stats_report
 
 if sys.version_info.major == 3:
     string_types = (str,)
@@ -389,3 +389,6 @@ class PostgresqlJobSet(object):
                                          'seconds'.format(a_row.id, total_secs))
         except JobsExhaustedError:
             self.logger.info('All jobs are exhausted, terminating.')
+
+    def _stats_report(self):
+        return get_stats_report(self.db_handle, self.jobset_id)

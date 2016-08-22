@@ -77,6 +77,9 @@ PERIODS = [
             ]
 
 def seconds_format(seconds):
+    if seconds is None:
+        return '∞'
+
     strings = []
     seconds = int(seconds)
     for period_name, period_seconds in PERIODS:
@@ -94,8 +97,9 @@ def seconds_unit(seconds):
     for period_name, period_seconds in PERIODS:
         if seconds >= period_seconds:
             return period_name, period_seconds
+    return PERIODS[-1]
 
-    
+
 def stats_to_str(s):
     n_jobs = s.n_remaining + s.n_completed
     period_str, period_secs = seconds_unit(s.mean_duration_trimmed)
