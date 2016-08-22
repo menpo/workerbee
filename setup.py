@@ -1,3 +1,4 @@
+from os.path import join
 from setuptools import setup, find_packages
 import sys
 import versioneer
@@ -5,6 +6,8 @@ import versioneer
 requirements = [
       'postgres>=2.2.1',
       'psycopg2>=2.6.1',
+      'docopt>=0.6',
+      'arrow>=0.8.0',
 ]
 
 if sys.version_info.major == 2:
@@ -17,5 +20,6 @@ setup(name='workerbee',
       author='The Menpo Team',
       author_email='hello@menpo.org',
       packages=find_packages(),
+      scripts=[join('bin', 'wbee')],
       install_requires=requirements
 )
