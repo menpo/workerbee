@@ -7,7 +7,7 @@ requirements = [
       'postgres>=2.2.1',
       'psycopg2>=2.6.1',
       'docopt>=0.6',
-      'arrow>=0.8.0',
+      'arrow>=0.7.0',
 ]
 
 if sys.version_info.major == 2:
