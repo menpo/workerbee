@@ -17,13 +17,19 @@ Options:
   --help                  show this screen
   -v --version            report workerbee version
 """
-from docopt import docopt
-from functools import partial
 import curses
+import logging
 import time
+from functools import partial
+
+from docopt import docopt
 
 import workerbee  # needed for version
 from workerbee import JobSet
+
+
+# Quiet all logging
+logging.basicConfig(stream=logging.NullHandler())
 
 
 def report_progress(jobset, scr):
@@ -85,6 +91,7 @@ if __name__ == "__main__":
 
     main_loop = partial(curses_ui, JobSet(a['<jobset_id>'],
                         host=a['--host'], port=a['--port'], user=a['--user'],
-                        password=a['--password'], dbname=a['--dbname']))
+                        password=a['--password'], dbname=a['--dbname'],
+                        logger_name=None))
 
     curses.wrapper(main_loop)
