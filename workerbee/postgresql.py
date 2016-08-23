@@ -12,7 +12,8 @@ from postgres import Postgres
 from psycopg2.extras import Json as postgres_jsonify
 
 from .base import DEFAULT_LOGGER, exponential_decay, timer
-from .exceptions import JobFailed, JobsExhaustedError
+from .exceptions import JobFailedError, JobsExhaustedError, \
+    UniqueInputDataConstraintError
 from .stats import get_stats_report
 
 if sys.version_info.major == 3:
@@ -228,15 +229,15 @@ def create_table(db_handle, tbl_name, logger_name=DEFAULT_LOGGER):
                                              jsonb=jsonb_input))
         # If Postgres >= 9.3 then create a unique constraint on the reserved
         # id key in the 'input_data'
-        if JSON_POSTGRES_OP_VER <= pg_ver < JSONB_POSTGRES_VER:
-            logger.info("Adding UNIQUE constraint to JSON field input_"
-                        "data->>'id'")
+        if pg_ver >= JSON_POSTGRES_OP_VER:
+            logger.info("Adding UNIQUE constraint to input_data->>'id' field")
             cursor.run(UNIQUE_INPUT_DATA_ID_CONSTRAINT.format(tbl_name=tbl_name))
         elif pg_ver >= JSONB_POSTGRES_VER:
             logger.info("Adding UNIQUE constraint to JSONB field input_data")
             cursor.run(UNIQUE_INPUT_DATA_CONSTRAINT.format(tbl_name=tbl_name))
         else:
-            logger.warn("NO UNIQUE constraint enforced")
+            logger.warn("NO UNIQUE constraint enforced - input_data field "
+                        "is of type JSON")
 
 
 def get_total_job_count(db_handle, tbl_name):
@@ -264,11 +265,12 @@ class PostgresqlJobSet(object):
 
     PostgreSQL >= 9.2 is required as the JSON type is utilized for data
     storage. PostgreSQL >= 9.4 is preferred as job data should be unique
-    for a given jobset. If  PostgreSQL == 9.2 then no UNIQUE constraints
+    for a given jobset. If PostgreSQL == 9.2 then no UNIQUE constraints
     are applied and this may not be ideal for complex cluster based job
-    systems. If PostgreSQL == 9.3 the UNIQUE constraint is enforced via a
+    systems. If PostgreSQL >= 9.3 the UNIQUE constraint is also enforced via a
     reserved `id` key in the ``input_data`` field - which should be unique to
-    each job in a jobset.
+    each job in a jobset. Therefore, the entire `input_data` `dict` must be
+    unique AND if the 'id' key is provided it must **also** be unique.
 
     Parameters
     ----------
@@ -345,6 +347,12 @@ class PostgresqlJobSet(object):
             If ``True``, ignore if the table for this jobset ID already exists.
             A warning will be printed to the logger.
 
+        Returns
+        -------
+        successful : `bool`
+            ``True`` if setting up the jobset was successful. Returns ``False``
+            if the jobset already exists and ``ignore_existing_jobset==True``
+
         Raises
         ------
         ValueError
@@ -359,6 +367,7 @@ class PostgresqlJobSet(object):
                 create_table(self.db_handle, self.jobset_id)
                 self.logger.info("Created table for jobset '{}'".format(
                     self.jobset_id))
+                return True
             except psycopg2.ProgrammingError as e:
                 if not ignore_existing_jobset:
                     # Re-raise - otherwise swallow
@@ -366,6 +375,7 @@ class PostgresqlJobSet(object):
                 else:
                     self.logger.warn("Table already exists for jobset '{}' - "
                                      "but ignoring".format(self.jobset_id))
+                    return False
 
     def does_jobset_exist(self):
         r"""Returns ``True`` if the jobset exists.
@@ -404,10 +414,16 @@ class PostgresqlJobSet(object):
         """
         query_str = INSERT_JOB_QUERY.format(tbl_name=self.jobset_id)
         params = {'parameters': {'input_data': postgres_jsonify(input_data)}}
-        if cursor is None:
-            self.db_handle.run(query_str, **params)
-        else:
-            cursor.run(query_str, **params)
+        try:
+            if cursor is None:
+                self.db_handle.run(query_str, **params)
+            else:
+                cursor.run(query_str, **params)
+        except psycopg2.IntegrityError as e:
+            err = UniqueInputDataConstraintError(e)
+            self.logger.error('Unable to add job as the UNIQUE constraint is '
+                              'being violated - {}'.format(err))
+            raise err
 
     def add_jobs(self, input_datas, cursor=None):
         r"""Add multiple jobs to the jobset as a single transaction.
@@ -435,14 +451,20 @@ class PostgresqlJobSet(object):
             If provided, the cursor will be used to submit the jobs, otherwise
             a new transaction will be created.
         """
-        if cursor is None:
-            with self.db_handle.get_cursor() as cursor:
+        try:
+            if cursor is None:
+                with self.db_handle.get_cursor() as cursor:
+                    for input_data in input_datas:
+                        self.add_job(input_data, cursor=cursor)
+            else:
                 for input_data in input_datas:
                     self.add_job(input_data, cursor=cursor)
-        else:
-            for input_data in input_datas:
-                self.add_job(input_data, cursor=cursor)
-        self.logger.info('Submitted {} jobs'.format(len(input_datas)))
+            self.logger.info('Submitted {} jobs'.format(len(input_datas)))
+        except psycopg2.IntegrityError as e:
+            err = UniqueInputDataConstraintError(e)
+            self.logger.error('Unable to add jobs as the UNIQUE constraint is '
+                              'being violated - {}'.format(err))
+            raise err
 
     def _set_job_as_complete(self, job_id, duration, output_data=None):
         r"""Set a job as completed.
@@ -557,7 +579,7 @@ class PostgresqlJobSet(object):
 
         And may optionally return a JSON serializable `dict` that stores
         the result of the job. In the event of a failure, the job should
-        raise a ``JobFailed`` exception. Workerbee jobs are expected to be
+        raise a ``JobFailedError`` exception. Workerbee jobs are expected to be
         deterministic and idempotent as Workerbee jobs may be processed
         multiple times. By default, the worker will terminate if all jobs
         are either marked as completed or violate the provided maximum
@@ -571,7 +593,7 @@ class PostgresqlJobSet(object):
             callable should process the job as required and may optionally
             return a JSON serializable Python `dict` as output data that
             will be stored as the result of the job. In result of failure,
-            the callable should raised a `JobFailed` exception. Workerbee
+            the callable should raised a `JobFailedError` exception. Workerbee
             expects the result of the callable to be deterministic and
             idempotent as a given job may be run multiple times.
         busywait : `bool`, optional
@@ -649,7 +671,7 @@ class PostgresqlJobSet(object):
                     try:
                         with timer() as t:
                             output_data = job_callable(a_row.input_data)
-                    except JobFailed:
+                    except JobFailedError:
                         d = next(fail_decay)
                         self._update_job_n_failed_attempts(a_row.id)
                         self.logger.warn('Failed to complete job (id: {}) - '
