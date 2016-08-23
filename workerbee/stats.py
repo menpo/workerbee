@@ -32,12 +32,12 @@ WITH
         SELECT 
             COUNT(*) AS n_completed_in_window
         FROM {tbl_name}
-        WHERE 
+    WHERE 
             time_last_completed > NOW() - (SELECT lookback_window FROM time_windows)
     ),
     rates AS (
         SELECT
-            n_completed_in_window / EXTRACT (epoch FROM lookback_window) AS jobs_per_sec
+            COALESCE(n_completed_in_window / EXTRACT (epoch FROM lookback_window), 0) AS jobs_per_sec
         FROM recent_finishes, time_windows
     ),
     finished AS (
@@ -69,18 +69,18 @@ def get_stats(db_handle, tbl_name):
 
 
 PERIODS = [
-            ('yr',   60*60*24*365),
-            ('mth',  60*60*24*30),
-            ('day',    60*60*24),
-            ('hr',   60*60),
-            ('min', 60),
-            ('sec', 1)
-            ]
+    ('yr',   60*60*24*365),
+    ('mth',  60*60*24*30),
+    ('day',    60*60*24),
+    ('hr',   60*60),
+    ('min', 60),
+    ('sec', 1)
+]
 
 
-def seconds_format(seconds):
+def seconds_format(seconds, if_none='-'):
     if seconds is None:
-        return '∞'
+        return if_none
 
     strings = []
     seconds = int(seconds)
@@ -96,22 +96,32 @@ def seconds_format(seconds):
 
 
 def seconds_unit(seconds):
+    if seconds is None:
+        return PERIODS[-1]  # default to seconds
     for period_name, period_seconds in PERIODS:
         if seconds >= period_seconds:
             return period_name, period_seconds
     return PERIODS[-1]
 
 
+def percent_str(a, b):
+    return "{:.2%}".format(a / b) if b != 0 else '-%'
+
+
 def stats_to_str(s):
     n_jobs = s.n_remaining + s.n_completed
+
     period_str, period_secs = seconds_unit(s.mean_duration_trimmed)
+
     return [
         ("jobs"                        , "{}".format(n_jobs)),
-        ("completed"                   , "{} ({:.2%})".format(s.n_completed, s.n_completed / n_jobs)),
+        ("completed"                   , "{} ({})".format(s.n_completed, percent_str(s.n_completed, n_jobs))),
         ("av. duration"                , "{}".format(seconds_format(s.mean_duration_trimmed))),
         ("jobs / {}".format(period_str), "{:.2f}".format(s.jobs_per_sec * period_secs)),
-        ("remaining"                   , "{}".format(seconds_format(s.secs_to_go))),
-        ("finishes"                    , "{}".format(arrow.get(s.finish_time).humanize()))
+        ("remaining"                   , "{}".format(seconds_format(s.secs_to_go, if_none='∞'))),
+        ("finishes"                    , "{}".format(arrow.get(s.finish_time).humanize()
+                                                     if s.finish_time is not None else
+                                                     'at heat death of universe'))
     ]
 
 

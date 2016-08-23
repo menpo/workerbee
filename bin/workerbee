@@ -3,7 +3,7 @@
 """Report progress of a workerbee experiment
 
 Usage:
-  workerbee <jobset_id> [--host=<host> --port=<port> --user=<user> --password=<password> -orkerbeename=<dbname>]
+  workerbee <jobset_id> [--host=<host> --port=<port> --user=<user> --password=<password> --dbname=<dbname>]
   workerbee (--help)
   workerbee --version
 
