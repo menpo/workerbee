@@ -26,8 +26,6 @@ test:
 
   imports:
     - workerbee
-    - workerbee.postgresql
-    - workerbee.filesystem
 
 about:
   home: https://github.com/menpo/workerbee/
