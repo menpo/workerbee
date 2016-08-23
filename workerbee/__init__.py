@@ -1,4 +1,4 @@
-from .exceptions import JobsExhaustedError, JobFailed
+from .exceptions import JobFailed
 from .postgresql import PostgresqlJobSet
 
 from ._version import get_versions

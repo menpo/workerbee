@@ -20,9 +20,9 @@ DEFAULT_LOGGER = 'workerbee'
 
 
 class timer:
-    r"""
-    Context manager for timing a Python function. Stores the interval as a
-    datetime.timedelta.
+    r"""Context manager for timing a Python function.
+
+    Stores the interval as a ``datetime.timedelta``.
     """
     def __enter__(self):
         # Record wall time

@@ -1,5 +1,6 @@
 import arrow
 
+
 STATS_QUERY = r"""
 WITH 
     secs AS (
@@ -75,6 +76,7 @@ PERIODS = [
             ('min', 60),
             ('sec', 1)
             ]
+
 
 def seconds_format(seconds):
     if seconds is None:
