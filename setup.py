@@ -4,10 +4,10 @@ import sys
 import versioneer
 
 requirements = [
-      'postgres>=2.2.1',
-      'psycopg2>=2.6.1',
+      'postgres>=2.2',
+      'psycopg2>=2.6',
       'docopt>=0.6',
-      'arrow>=0.7.0',
+      'arrow>=0.7',
 ]
 
 if sys.version_info.major == 2:
