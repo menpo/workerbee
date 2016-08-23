@@ -262,6 +262,14 @@ class PostgresqlJobSet(object):
     JSON type and thus the Python `dict` objects provided/returned must be
     JSON serializable.
 
+    PostgreSQL >= 9.2 is required as the JSON type is utilized for data
+    storage. PostgreSQL >= 9.4 is preferred as job data should be unique
+    for a given jobset. If  PostgreSQL == 9.2 then no UNIQUE constraints
+    are applied and this may not be ideal for complex cluster based job
+    systems. If PostgreSQL == 9.3 the UNIQUE constraint is enforced via a
+    reserved `id` key in the ``input_data`` field - which should be unique to
+    each job in a jobset.
+
     Parameters
     ----------
     jobset_id : `str`
@@ -379,6 +387,11 @@ class PostgresqlJobSet(object):
         JSON type and thus the Python `dict` objects provided must be
         JSON serializable.
 
+        The ``input_data`` MUST BE UNIQUE in the jobset. For PostgreSQL < 9.4
+        this is enforced by a reserved key 'id' in the jobset. Set this
+        value to a unique value per job in order to enforce the uniqueness
+        constraint.
+
         Parameters
         ----------
         input_data : `dict`
@@ -406,6 +419,11 @@ class PostgresqlJobSet(object):
         Note that the input data are stored in PostgreSQL using the
         JSON type and thus the Python `dict` objects provided must be
         JSON serializable.
+
+        The ``input_data`` MUST BE UNIQUE in the jobset. For PostgreSQL < 9.4
+        this is enforced by a reserved key 'id' in the jobset. Set this
+        value to a unique value per job in order to enforce the uniqueness
+        constraint.
 
         Parameters
         ----------
