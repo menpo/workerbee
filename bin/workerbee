@@ -23,7 +23,7 @@ import curses
 import time
 
 import workerbee  # needed for version
-from workerbee import PostgresqlJobSet
+from workerbee import JobSet
 
 
 def report_progress(jobset, scr):
@@ -42,7 +42,7 @@ def report_progress(jobset, scr):
         heading_padded = heading.rjust(h_width - 1).ljust(h_width)
         scr.addstr(i, 0, heading_padded, curses.A_STANDOUT)
         scr.addstr(i, h_width + 1, value)
-    
+
     scr.addstr(i + 2, 1, "Press 'q' to quit, 'r' to manually refresh")
     scr.refresh()
 
@@ -53,6 +53,7 @@ def report_progress(jobset, scr):
     else:
         # refresh every 10 secs if no work is currently being done
         return 10
+
 
 def curses_ui(jobset, stdscr):
     curses.halfdelay(1)
@@ -82,8 +83,8 @@ def curses_ui(jobset, stdscr):
 if __name__ == "__main__":
     a = docopt(__doc__, version='workerbee v{}'.format(workerbee.__version__))
 
-    main_loop = partial(curses_ui, PostgresqlJobSet(a['<jobset_id>'],
-        host=a['--host'], port=a['--port'], user=a['--user'],
-        password=a['--password'], dbname=a['--dbname']))
-    
+    main_loop = partial(curses_ui, JobSet(a['<jobset_id>'],
+                        host=a['--host'], port=a['--port'], user=a['--user'],
+                        password=a['--password'], dbname=a['--dbname']))
+
     curses.wrapper(main_loop)

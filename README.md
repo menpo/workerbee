@@ -66,7 +66,7 @@ exponential backoff.
 
 ## Practical Usage
 For now the only database supported for workerbee is PostgreSQL >= 9.2. Due to
-the use of the JSON type for data storage, PostgreSQL >= 9.4 is the advised.
+the use of the JSON type for data storage, PostgreSQL >= 9.4 is advised.
 
 ### Running on a single node
 Here we assume the most basic case where you have a set of jobs to do (which
@@ -193,7 +193,7 @@ jobset.run(job_function)
 
 ### Handling failures
 In certain cases, it might be expected that it is possible for a job to fail
-for an unpredictable but possibly recoverable error. For example, a temporary
+due to an unpredictable but possibly recoverable error. For example, a temporary
 disconnection of a remote file server. In this case, you may want to guard
 against these exceptions and raise the `JobFailedError` exception.
 In contrast to other exceptions, `JobFailedError` is tracked by the jobset
