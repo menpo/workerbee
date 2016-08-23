@@ -110,9 +110,7 @@ def percent_str(a, b):
 
 def stats_to_str(s):
     n_jobs = s.n_remaining + s.n_completed
-
     period_str, period_secs = seconds_unit(s.mean_duration_trimmed)
-
     return [
         ("jobs"                        , "{}".format(n_jobs)),
         ("completed"                   , "{} ({})".format(s.n_completed, percent_str(s.n_completed, n_jobs))),
