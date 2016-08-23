@@ -364,7 +364,8 @@ class PostgresqlJobSet(object):
             raise ValueError(msg)
         else:
             try:
-                create_table(self.db_handle, self.jobset_id)
+                create_table(self.db_handle, self.jobset_id,
+                             logger_name=self.logger_name)
                 self.logger.info("Created table for jobset '{}'".format(
                     self.jobset_id))
                 return True
