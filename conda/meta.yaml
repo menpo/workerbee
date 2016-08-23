@@ -20,7 +20,7 @@ requirements:
     - psycopg2 >=2.6.1
     - postgres >=2.2.1
     - docopt >=0.6.0
-    - arrow >= 0.7.0
+    - arrow >=0.7.0
 
 test:
 
