@@ -1,5 +1,13 @@
 import arrow
 
+PERIODS = [
+    ('yr',  60*60*24*365),
+    ('mth', 60*60*24*30),
+    ('day', 60*60*24),
+    ('hr',  60*60),
+    ('min', 60),
+    ('sec', 1)
+]
 
 STATS_QUERY = r"""
 WITH 
@@ -68,16 +76,6 @@ def get_stats(db_handle, tbl_name):
     return db_handle.one(STATS_QUERY.format(tbl_name=tbl_name))
 
 
-PERIODS = [
-    ('yr',   60*60*24*365),
-    ('mth',  60*60*24*30),
-    ('day',    60*60*24),
-    ('hr',   60*60),
-    ('min', 60),
-    ('sec', 1)
-]
-
-
 def seconds_format(seconds, if_none='-'):
     if seconds is None:
         return if_none
@@ -112,9 +110,10 @@ def stats_to_str(s):
     n_jobs = s.n_remaining + s.n_completed
     period_str, period_secs = seconds_unit(s.mean_duration_trimmed)
     return [
-        ("jobs"                        , "{}".format(n_jobs)),
-        ("completed"                   , "{} ({})".format(s.n_completed, percent_str(s.n_completed, n_jobs))),
-        ("av. duration"                , "{}".format(seconds_format(s.mean_duration_trimmed)))
+        ("jobs"        , "{}".format(n_jobs)),
+        ("completed"   , "{} ({})".format(s.n_completed, 
+                                          percent_str(s.n_completed, n_jobs))),
+        ("av. duration", "{}".format(seconds_format(s.mean_duration_trimmed)))
     ] + ([
         ("jobs / {}".format(period_str), "{:.2f}".format(s.jobs_per_sec * period_secs)),
         ("remaining"                   , "{}".format(seconds_format(s.secs_to_go, if_none='∞'))),
