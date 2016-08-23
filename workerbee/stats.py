@@ -92,7 +92,7 @@ def seconds_format(seconds, if_none='-'):
             else:
                 strings.append("%s %ss" % (period_value, period_name))
 
-    return ", ".join(strings)
+    return ", ".join(strings) if len(strings) > 0 else '< 1 second'
 
 
 def seconds_unit(seconds):
@@ -116,13 +116,14 @@ def stats_to_str(s):
     return [
         ("jobs"                        , "{}".format(n_jobs)),
         ("completed"                   , "{} ({})".format(s.n_completed, percent_str(s.n_completed, n_jobs))),
-        ("av. duration"                , "{}".format(seconds_format(s.mean_duration_trimmed))),
+        ("av. duration"                , "{}".format(seconds_format(s.mean_duration_trimmed)))
+    ] + ([
         ("jobs / {}".format(period_str), "{:.2f}".format(s.jobs_per_sec * period_secs)),
         ("remaining"                   , "{}".format(seconds_format(s.secs_to_go, if_none='∞'))),
         ("finishes"                    , "{}".format(arrow.get(s.finish_time).humanize()
                                                      if s.finish_time is not None else
                                                      'at heat death of universe'))
-    ]
+    ] if s.n_remaining > 0 else [])
 
 
 def get_stats_report(db_handle, tbl_name):
