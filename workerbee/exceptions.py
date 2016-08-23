@@ -23,6 +23,10 @@ class JobFailedError(ValueError):
 
 
 class UniqueInputDataConstraintError(ValueError):
+    r"""
+    This exception is thrown when jobs are attempted to be added to a jobset
+    that violate the UNIQUE constraints.
+    """
     PGERROR_REGEX = re.compile("Key \(\(input_data ->> 'id'::text\)\)=\((.*)\) already exists.")
 
     def __init__(self, pg_error, msg=None):
