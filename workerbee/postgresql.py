@@ -122,7 +122,7 @@ class DBConnectionInfo(object):
     def __init__(self, host=None, port=None, user=None, password=None,
                  dbname=None):
         self.host = host or os.environ.get('PGHOST', None)
-        self.port = port or os.environ.get('PGPORT', None)
+        self.port = port or os.environ.get('PGPORT', 5432)
         self.user = user or os.environ.get('PGUSER', None)
         self.dbname = dbname or os.environ.get('PGDATABASE', None)
         self.password = password
