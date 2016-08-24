@@ -10,15 +10,15 @@ PERIODS = [
 ]
 
 STATS_QUERY = r"""
-WITH 
+WITH
     secs AS (
         SELECT EXTRACT (epoch FROM job_duration) AS job_duration_secs
         FROM {tbl_name}
     ),
     stats AS (
-        SELECT 
+        SELECT
             AVG(job_duration_secs) AS mean_duration,
-            STDDEV_SAMP(job_duration_secs) AS stddev_duration 
+            STDDEV_SAMP(job_duration_secs) AS stddev_duration
         FROM secs
     ),
     bounds AS (
@@ -30,17 +30,17 @@ WITH
         SELECT AVG(job_duration_secs) as mean_duration_trimmed
         FROM secs
         WHERE job_duration_secs BETWEEN (SELECT lower_bound FROM bounds) AND (SELECT upper_bound FROM bounds)
-    ),  
+    ),
     time_windows AS (
-        SELECT 
-            make_interval(secs := mean_duration_trimmed + 3 * stddev_duration) AS lookback_window
+        SELECT
+            (mean_duration_trimmed + 3 * stddev_duration) * interval '1 second' AS lookback_window
         FROM stats_trimmed, stats
     ),
     recent_finishes AS (
-        SELECT 
+        SELECT
             COUNT(*) AS n_completed_in_window
         FROM {tbl_name}
-    WHERE 
+    WHERE
             time_last_completed > NOW() - (SELECT lookback_window FROM time_windows)
     ),
     rates AS (
@@ -49,17 +49,17 @@ WITH
         FROM recent_finishes, time_windows
     ),
     finished AS (
-        SELECT 
+        SELECT
             COUNT(*) AS n_completed
         FROM {tbl_name}
-        WHERE 
+        WHERE
             time_last_completed IS NOT NULL
     ),
     remaining AS (
-        SELECT 
+        SELECT
             COUNT(*) AS n_remaining
         FROM {tbl_name}
-        WHERE 
+        WHERE
             time_last_completed IS NULL
     ),
     etas AS (
@@ -67,7 +67,7 @@ WITH
             n_remaining / NULLIF(jobs_per_sec, 0) AS secs_to_go
         FROM remaining, rates
     )
-SELECT *, NOW() + make_interval(secs := secs_to_go) as finish_time
+SELECT *, NOW() + (secs_to_go * interval '1 second') as finish_time
 FROM stats, stats_trimmed, time_windows, recent_finishes, finished, remaining, rates, etas
 """.strip()
 
@@ -111,7 +111,7 @@ def stats_to_str(s):
     period_str, period_secs = seconds_unit(s.mean_duration_trimmed)
     return [
         ("jobs"        , "{}".format(n_jobs)),
-        ("completed"   , "{} ({})".format(s.n_completed, 
+        ("completed"   , "{} ({})".format(s.n_completed,
                                           percent_str(s.n_completed, n_jobs))),
         ("av. duration", "{}".format(seconds_format(s.mean_duration_trimmed)))
     ] + ([
