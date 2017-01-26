@@ -261,4 +261,4 @@ def job_function(job_data):
     ...
 ```
 **Be cautuous with this paradigm - as some nodes may enter an irrecoverable
-state that will mark all jobs as failures!**.
+state that will mark all jobs as failures!**
