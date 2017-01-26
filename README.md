@@ -27,7 +27,7 @@ Each jobset contains a number of unique **jobs**.
 Workerbee is a Python framework that you run **on every instance of your process
 on all machines**. That is to say, you modify your processing script to look
 something like:
-```py
+```python
 from workerbee import JobSet
 ...
 
@@ -73,7 +73,7 @@ Here we assume the most basic case where you have a set of jobs to do (which
 could easily be completed via a simple for loop!) and we will run the code below
 on a single machine.
 
-```py
+```python
 import time
 from workerbee import JobSet
 
@@ -101,7 +101,7 @@ existing jobset.
 Key takeaways:
 
 1. To use workerbee you need to form a function with the signature:
-    ```py
+    ```python
     def job_function(job_data):
         ...
     ```
@@ -119,7 +119,7 @@ Below we assume the script will be run on many machines. How this code is
 deployed is not discussed here, but we recommend batch processing systems
 such as [HTCondor](https://research.cs.wisc.edu/htcondor/).
 
-```py
+```python
 import time
 from workerbee import JobSet
 
@@ -152,7 +152,7 @@ provides a default logger ('workerbee') which prints a formatted message to
 `stdout`. It may be preferable to implement your own logger with a custom
 handler that logs to a file for example.
 
-```py
+```python
 import logging
 import time
 import sys
@@ -203,7 +203,7 @@ exceptions will cause the workerbee process to terminate as normal.
 
 For example, below we simulate an `OSError` by creating a read-only file and
 attempting to write into it.
-```py
+```python
 import time
 from pathlib import Path
 from workerbee import JobSet, JobFailedError
@@ -243,7 +243,7 @@ to prevent unnecessary database load.
 
 Alternatively, you may want to be resilient to all errors, this would be easily
 achieved with a catch all `try`/`except`:
-```py
+```python
 def job_function(job_data):
     try:
         ...
@@ -252,7 +252,7 @@ def job_function(job_data):
 ```
 Which will never terminate due to an exception. To avoid boilerplate, we provide
 a decorator that provides this functionality.
-```py
+```python
 from workerbee import catch_all_exceptions
 
 @catch_all_exceptions
